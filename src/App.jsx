@@ -38,33 +38,67 @@ function categorize(description) {
 }
 
 // ─── CSV PARSER ───
+function splitCSVRow(line) {
+  const result = [];
+  let current = "", inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') inQuotes = !inQuotes;
+    else if (ch === "," && !inQuotes) { result.push(current.trim()); current = ""; }
+    else current += ch;
+  }
+  result.push(current.trim());
+  return result;
+}
+
 function parseCSV(text) {
   const lines = text.split("\n").filter(l => l.trim());
   if (lines.length < 2) return [];
 
-  const header = lines[0].toLowerCase();
+  const headerCols = splitCSVRow(lines[0]).map(h => h.toLowerCase().replace(/['"]/g, ""));
   const expenses = [];
 
+  // Find columns by header name (supports Lloyds, Barclays, HSBC, Monzo, etc.)
+  const dateIdx = headerCols.findIndex(h => /date/.test(h));
+  const descIdx = headerCols.findIndex(h => /description|narrative|details|memo|reference/.test(h));
+  const debitIdx = headerCols.findIndex(h => /debit|money\s*out|paid\s*out|withdrawal/.test(h));
+  const creditIdx = headerCols.findIndex(h => /credit|money\s*in|paid\s*in|deposit/.test(h));
+  const amountIdx = headerCols.findIndex(h => /^amount$|^value$/.test(h));
+  const useHeaders = descIdx >= 0;
+
   for (let i = 1; i < lines.length; i++) {
-    const cols = lines[i].match(/(".*?"|[^,]+)/g)?.map(c => c.replace(/^"|"$/g, "").trim()) || [];
-    if (cols.length < 2) continue;
+    const cols = splitCSVRow(lines[i]);
+    if (cols.length < 3) continue;
 
     let date = null, description = null, amount = null;
 
-    // Try to detect columns
-    for (let j = 0; j < cols.length; j++) {
-      const val = cols[j];
-      if (!date && /\d{1,4}[\/-]\d{1,2}[\/-]\d{1,4}/.test(val)) {
-        date = val;
-      } else if (!amount && /^-?[\u00A3$]?\d+[.,]\d{2}$/.test(val.replace(/[\u00A3$,\s]/g, ""))) {
-        const num = parseFloat(val.replace(/[\u00A3$,\s]/g, ""));
-        if (num < 0 || amount === null) amount = Math.abs(num);
-      } else if (!description && val.length > 2 && !/^\d+[.,]?\d*$/.test(val)) {
-        description = val;
+    if (useHeaders) {
+      // Header-based parsing
+      date = dateIdx >= 0 ? cols[dateIdx] : null;
+      description = cols[descIdx]?.replace(/^['"]|['"]$/g, "");
+
+      if (debitIdx >= 0) {
+        const debit = parseFloat((cols[debitIdx] || "").replace(/[\u00A3$,\s]/g, ""));
+        if (debit > 0) amount = debit;
+      } else if (amountIdx >= 0) {
+        const val = parseFloat((cols[amountIdx] || "").replace(/[\u00A3$,\s]/g, ""));
+        if (val && val < 0) amount = Math.abs(val); // Negative = spend
+        else if (val && val > 0 && creditIdx < 0) amount = val; // No separate credit col
+      }
+    } else {
+      // Fallback: auto-detect columns
+      for (let j = 0; j < cols.length; j++) {
+        const val = cols[j];
+        if (!date && /\d{1,4}[\/-]\d{1,2}[\/-]\d{1,4}/.test(val)) date = val;
+        else if (!amount && /^-?[\u00A3$]?\d+[.,]\d{2}$/.test(val.replace(/[\u00A3$,\s]/g, ""))) {
+          const num = parseFloat(val.replace(/[\u00A3$,\s]/g, ""));
+          amount = Math.abs(num);
+        }
+        else if (!description && val.length > 2 && !/^\d+[.,]?\d*$/.test(val)) description = val;
       }
     }
 
-    if (description && amount) {
+    if (description && amount && amount > 0) {
       expenses.push({
         id: crypto.randomUUID(),
         date: date || new Date().toISOString().split("T")[0],
@@ -81,7 +115,7 @@ function parseCSV(text) {
 // ─── PDF TEXT PARSER ───
 async function parsePDFText(file) {
   const pdfjsLib = await import("pdfjs-dist");
-  pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`;
+  pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
 
   const arrayBuffer = await file.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
@@ -90,7 +124,18 @@ async function parsePDFText(file) {
   for (let i = 1; i <= pdf.numPages; i++) {
     const page = await pdf.getPage(i);
     const content = await page.getTextContent();
-    fullText += content.items.map(item => item.str).join(" ") + "\n";
+    // Group items by Y position to reconstruct lines
+    const items = content.items.filter(item => item.str.trim());
+    const lineMap = {};
+    items.forEach(item => {
+      const y = Math.round(item.transform[5]);
+      if (!lineMap[y]) lineMap[y] = [];
+      lineMap[y].push({ x: item.transform[4], text: item.str });
+    });
+    const sortedLines = Object.entries(lineMap)
+      .sort(([a], [b]) => Number(b) - Number(a))
+      .map(([, items]) => items.sort((a, b) => a.x - b.x).map(i => i.text).join("  "));
+    fullText += sortedLines.join("\n") + "\n";
   }
 
   // Try to extract transactions from the text
@@ -98,7 +143,25 @@ async function parsePDFText(file) {
   const lines = fullText.split("\n");
 
   for (const line of lines) {
-    // Look for patterns like: date description amount
+    // Pattern 1: "02 Jan 26  Digby's Patisserie  DEB  3.00  5,258.24" (Lloyds-style)
+    const lloydsMatch = line.match(/(\d{1,2}\s+\w{3}\s+\d{2,4})\s{2,}(.+?)\s{2,}(?:DEB|DD|SO|BP|FPI|TFR|BGC|FPO|DEP|ATM)\s{2,}(?:[\d,]+\.\d{2}\s{2,})?(\d[\d,]*\.\d{2})\s{2,}[\d,]+\.\d{2}/);
+    if (lloydsMatch) {
+      const [, date, desc, moneyOut] = lloydsMatch;
+      const amount = parseFloat(moneyOut.replace(/,/g, ""));
+      if (amount > 0 && desc.trim().length > 1) {
+        expenses.push({
+          id: crypto.randomUUID(),
+          date: date.trim(),
+          description: desc.trim(),
+          amount: parseFloat(amount.toFixed(2)),
+          category: categorize(desc),
+          source: "pdf",
+        });
+        continue;
+      }
+    }
+
+    // Pattern 2: Generic "date description amount"
     const match = line.match(/(\d{1,2}[\/-]\w{3}[\/-]?\d{0,4}|\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4})\s+(.+?)\s+([\u00A3$]?\d+[.,]\d{2})\s*$/);
     if (match) {
       const [, date, desc, amt] = match;
@@ -118,25 +181,132 @@ async function parsePDFText(file) {
   return { expenses, rawText: fullText };
 }
 
-// ─── RECEIPT IMAGE PARSER (placeholder for Google Cloud Vision) ───
-async function parseReceiptImage(file) {
-  return new Promise((resolve) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      resolve({
-        imageData: reader.result,
-        expenses: [], // Will be populated when OCR is added in phase 2
-        rawText: "Receipt image saved. OCR processing coming soon!",
+// ─── RECEIPT OCR PARSER (Tesseract.js) ───
+function extractReceiptData(ocrText) {
+  const lines = ocrText.split("\n").map(l => l.trim()).filter(Boolean);
+  let merchant = null, total = null, date = null;
+
+  // Extract merchant (usually the first meaningful line)
+  for (const line of lines.slice(0, 5)) {
+    const clean = line.replace(/[^a-zA-Z0-9\s&'.-]/g, "").trim();
+    if (clean.length > 2 && clean.length < 60 && !/^\d+$/.test(clean) && !/tel|phone|fax|vat|reg/i.test(clean)) {
+      merchant = clean;
+      break;
+    }
+  }
+
+  // Extract total amount (look for "total", "amount due", "balance", etc.)
+  const totalPatterns = [
+    /(?:total|amount\s*due|balance\s*due|grand\s*total|to\s*pay|card\s*payment|debit\s*card|visa|mastercard|contactless)\s*[:\s]*£?\s*(\d+[.,]\d{2})/i,
+    /£\s*(\d+[.,]\d{2})\s*(?:total|due|paid)/i,
+  ];
+  for (const line of lines.reverse()) {
+    for (const pattern of totalPatterns) {
+      const match = line.match(pattern);
+      if (match) {
+        total = parseFloat(match[1].replace(",", "."));
+        break;
+      }
+    }
+    if (total) break;
+  }
+  // Fallback: find the largest pound amount
+  if (!total) {
+    let maxAmt = 0;
+    for (const line of lines) {
+      const amts = [...line.matchAll(/£\s*(\d+[.,]\d{2})/g)];
+      for (const m of amts) {
+        const v = parseFloat(m[1].replace(",", "."));
+        if (v > maxAmt) maxAmt = v;
+      }
+    }
+    if (maxAmt > 0) total = maxAmt;
+  }
+
+  // Extract date
+  const datePatterns = [
+    /(\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4})/,
+    /(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s+\d{2,4})/i,
+  ];
+  for (const line of lines) {
+    for (const pattern of datePatterns) {
+      const match = line.match(pattern);
+      if (match) { date = match[1]; break; }
+    }
+    if (date) break;
+  }
+
+  return { merchant, total, date };
+}
+
+async function parseReceiptImage(file, onProgress) {
+  const Tesseract = await import("tesseract.js");
+  const imageUrl = URL.createObjectURL(file);
+
+  try {
+    const result = await Tesseract.recognize(imageUrl, "eng", {
+      logger: (m) => {
+        if (m.status === "recognizing text" && onProgress) {
+          onProgress(Math.round(m.progress * 100));
+        }
+      },
+    });
+
+    const ocrText = result.data.text;
+    const extracted = extractReceiptData(ocrText);
+
+    // Build expense if we got enough info
+    const expenses = [];
+    if (extracted.total && extracted.total > 0) {
+      expenses.push({
+        id: crypto.randomUUID(),
+        date: extracted.date || new Date().toISOString().split("T")[0],
+        description: extracted.merchant || "Receipt purchase",
+        amount: parseFloat(extracted.total.toFixed(2)),
+        category: extracted.merchant ? categorize(extracted.merchant) : "Other",
+        source: "receipt",
       });
-    };
-    reader.readAsDataURL(file);
-  });
+    }
+
+    // Get base64 for storage
+    const imageData = await new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.readAsDataURL(file);
+    });
+
+    return { imageData, expenses, rawText: ocrText, extracted };
+  } finally {
+    URL.revokeObjectURL(imageUrl);
+  }
 }
 
 // ─── MONTH HELPERS ───
+function parseUKDate(dateStr) {
+  if (!dateStr) return new Date();
+  const s = dateStr.trim();
+  // DD/MM/YYYY or DD-MM-YYYY
+  const dmy = s.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{2,4})$/);
+  if (dmy) {
+    const [, d, m, y] = dmy;
+    const year = y.length === 2 ? 2000 + parseInt(y) : parseInt(y);
+    return new Date(year, parseInt(m) - 1, parseInt(d));
+  }
+  // "02 Jan 26" or "02 Jan 2026"
+  const dmy2 = s.match(/^(\d{1,2})\s+(\w{3})\s+(\d{2,4})$/);
+  if (dmy2) {
+    const [, d, mName, y] = dmy2;
+    const months = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+    const year = y.length === 2 ? 2000 + parseInt(y) : parseInt(y);
+    return new Date(year, months[mName.toLowerCase()] ?? 0, parseInt(d));
+  }
+  const d = new Date(s);
+  return isNaN(d) ? new Date() : d;
+}
+
 function getMonthKey(dateStr) {
   try {
-    const d = new Date(dateStr);
+    const d = parseUKDate(dateStr);
     if (isNaN(d)) return new Date().toISOString().slice(0, 7);
     return d.toISOString().slice(0, 7);
   } catch {
@@ -166,6 +336,7 @@ export default function App() {
   const [selectedMonth, setSelectedMonth] = useState("all");
   const [editingId, setEditingId] = useState(null);
   const [importResult, setImportResult] = useState(null);
+  const [ocrProgress, setOcrProgress] = useState(null);
 
   const isFromCloud = useRef(false);
   const userRef = useRef(null);
@@ -312,9 +483,18 @@ export default function App() {
         const parsed = await parsePDFText(file);
         result = { count: parsed.expenses.length, expenses: parsed.expenses, rawText: parsed.rawText };
       } else if (file.type?.startsWith("image/")) {
-        const parsed = await parseReceiptImage(file);
+        setImportResult({ status: "processing", message: "Reading receipt..." });
+        setOcrProgress(0);
+        const parsed = await parseReceiptImage(file, (p) => setOcrProgress(p));
+        setOcrProgress(null);
         setReceipts(prev => [...prev, { id: crypto.randomUUID(), imageData: parsed.imageData, date: new Date().toISOString(), fileName: file.name }]);
-        setImportResult({ status: "success", message: "Receipt image saved! OCR coming in phase 2." });
+        if (parsed.expenses.length > 0) {
+          setExpenses(prev => [...parsed.expenses, ...prev]);
+          const e = parsed.expenses[0];
+          setImportResult({ status: "success", message: `Receipt scanned! Added "${e.description}" for ${formatCurrency(e.amount)}` });
+        } else {
+          setImportResult({ status: "warning", message: "Receipt saved but couldn't extract the total automatically. You can add it manually." });
+        }
         return;
       } else {
         setImportResult({ status: "error", message: "Unsupported file type. Use CSV, PDF, or image files." });
@@ -608,13 +788,22 @@ export default function App() {
             <div className="bg-white rounded-2xl border border-gray-100 p-6 text-center">
               <span className="text-4xl block mb-3">{"\u{1F4F8}"}</span>
               <h3 className="text-base font-semibold text-gray-800 mb-1">Scan Receipt</h3>
-              <p className="text-sm text-gray-500 mb-4">Take a photo of your receipt</p>
-              <label className="inline-flex items-center gap-2 px-5 py-3 bg-violet-500 text-white text-sm font-medium rounded-xl hover:bg-violet-600 transition-all cursor-pointer">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
-                Take Photo / Upload
-                <input type="file" accept="image/*" capture="environment" onChange={handleFileImport} className="hidden" />
-              </label>
-              <p className="text-xs text-gray-400 mt-3">OCR auto-read coming in next update!</p>
+              <p className="text-sm text-gray-500 mb-4">Take a photo and we'll read it automatically</p>
+              {ocrProgress !== null ? (
+                <div className="space-y-2">
+                  <div className="w-full bg-gray-200 rounded-full h-2.5">
+                    <div className="bg-violet-500 h-2.5 rounded-full transition-all duration-300" style={{ width: `${ocrProgress}%` }}></div>
+                  </div>
+                  <p className="text-xs text-violet-600 font-medium">Reading receipt... {ocrProgress}%</p>
+                </div>
+              ) : (
+                <label className="inline-flex items-center gap-2 px-5 py-3 bg-violet-500 text-white text-sm font-medium rounded-xl hover:bg-violet-600 transition-all cursor-pointer">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+                  Take Photo / Upload
+                  <input type="file" accept="image/*" capture="environment" onChange={handleFileImport} className="hidden" />
+                </label>
+              )}
+              <p className="text-xs text-gray-400 mt-3">Auto-reads merchant, total & date from receipts</p>
             </div>
 
             {/* Import result toast */}
