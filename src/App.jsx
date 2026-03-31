@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo, useCallback } from "react";
+himport { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { auth, googleProvider, db } from "./firebase";
 import { onAuthStateChanged, signInWithPopup, signOut } from "firebase/auth";
 import { doc, setDoc, onSnapshot } from "firebase/firestore";
@@ -249,7 +249,7 @@ function extractReceiptData(ocrText) {
     const trimmed = line.trim();
 
     if (!total) {
-      const totalMatch = trimmed.match(/(?:total|amount|price):\s*[\$Â£â¬]?\s*([\d.]+)/i);
+      const totalMatch = trimmed.match(/(?:total|amount|price):\s*[\$£â¬]?\s*([\d.]+)/i);
       if (totalMatch) total = parseFloat(totalMatch[1]);
     }
 
@@ -374,7 +374,7 @@ function formatMonth(key) {
 }
 
 function formatCurrency(n) {
-  return "Â£" + n.toFixed(2);
+  return "£" + n.toFixed(2);
 }
 
 export default function App() {
