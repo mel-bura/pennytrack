@@ -1,4 +1,4 @@
-himport { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { auth, googleProvider, db } from "./firebase";
 import { onAuthStateChanged, signInWithPopup, signOut } from "firebase/auth";
 import { doc, setDoc, onSnapshot } from "firebase/firestore";
@@ -32,7 +32,7 @@ const CATEGORY_KEYWORDS = {
   "Cash": ["atm", "cash", "withdrawal", "cashback"],
 };
 
-const PAYMENT_PREFIXES = ["paypal *", "paypal*", "pp*", "pp *", "sq *", "sq*", "sqr*", "google *", "google*", "apple.com/bill", "amzn ", "amzn*", "amz*", "goog*", "msft*", "msft *", "izettle*", "sumup*", "sum up*", "stripe*", "zettle*"];
+const PAYMENT_PREFIXES = ["paypal *", "paypal*", "pp*", "pp *", "sq *", "sq*", "sqr*", "google *", "google*", "apple.com/bill", "amzn ", "amzn*", "amzn*", "goog*", "msft*", "msft *", "izettle*", "sumup*", "sum up*", "stripe*", "zettle*"];
 
 const PAYMENT_TYPES = {
   "BGC": { label: "Bank Giro Credit", icon: "\u{1F3E6}", type: "income" },
@@ -249,7 +249,7 @@ function extractReceiptData(ocrText) {
     const trimmed = line.trim();
 
     if (!total) {
-      const totalMatch = trimmed.match(/(?:total|amount|price):\s*[\$£â¬]?\s*([\d.]+)/i);
+      const totalMatch = trimmed.match(/(?:total|amount|price):\s*[\$£€]?\s*([\d.]+)/i);
       if (totalMatch) total = parseFloat(totalMatch[1]);
     }
 
@@ -929,7 +929,7 @@ export default function App() {
           {tabs.map((tab) => (
             <button
               key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
+             onClick={() => setActiveTab(tab.id)}
               className={`py-4 px-2 border-b-2 font-medium text-sm transition-all ${
                 activeTab === tab.id
                   ? "border-violet-600 text-violet-600"
@@ -1230,7 +1230,7 @@ export default function App() {
                     </div>
                     {/* Date info - editable */}
                     <div className="mt-3 pt-3 border-t border-gray-50 flex items-center justify-between">
-                      <div className="flex items-center gap-2">
+                            <div className="flex items-center gap-2">
                         <span className="text-xs text-gray-500">{"\u{1F4C5}"} Last:</span>
                         {editingRecurringDate === r.key ? (
                           <input
