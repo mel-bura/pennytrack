@@ -4,7 +4,8 @@ import { onAuthStateChanged, signInWithPopup, signOut } from "firebase/auth";
 import { doc, setDoc, onSnapshot } from "firebase/firestore";
 import { PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend } from "recharts";
 
-// ─── CATEGORIES ───
+// CATEGORIES constant with: Groceries, Eating Out, Transport, Shopping, Bills & Utilities, Entertainment, Health, Subscriptions, Cash, Other - each with icon and color
+
 const CATEGORIES = {
   "Groceries": { icon: "\u{1F6D2}", color: "#10b981" },
   "Eating Out": { icon: "\u{1F354}", color: "#f59e0b" },
@@ -18,6 +19,7 @@ const CATEGORIES = {
   "Other": { icon: "\u{1F4E6}", color: "#9ca3af" },
 };
 
+// CATEGORY_KEYWORDS - large object mapping category names to arrays of merchant keywords (keep ALL of these exactly as-is)
 const CATEGORY_KEYWORDS = {
   "Groceries": ["tesco", "sainsbury", "asda", "aldi", "lidl", "morrisons", "waitrose", "co-op", "coop", "ocado", "iceland", "m&s food", "m&s simply", "marks & spencer food", "grocery", "supermarket", "spar ", "nisa ", "londis", "budgens", "one stop", "farmfoods", "heron foods", "home bargains", "poundland", "costco", "whole foods", "planet organic", "abel & cole", "riverford", "gousto", "hello fresh", "mindful chef", "getir", "gorillas", "jiffy", "zapp"],
   "Eating Out": ["mcdonald", "kfc", "nando", "greggs", "costa", "starbucks", "pret", "domino", "pizza", "uber eats", "ubereats", "deliveroo", "just eat", "justeat", "restaurant", "cafe", "coffee", "burger", "subway", "wetherspoon", "wagamama", "zizzi", "five guys", "leon ", "itsu", "tortilla", "wasabi", "yo sushi", "caffe nero", "tim hortons", "krispy kreme", "bakery", "chippy", "kebab", "takeaway", "take away", "food order", "dining", "pub ", "brewdog", "toby carvery", "harvester", "beefeater", "prezzo", "carluccio", "bill's", "honest burger", "tgi friday", "bella italia", "ask italian", "patisserie", "gourmet burger", "shake shack", "chipotle", "taco bell", "popeyes", "wendy's", "chick-fil-a", "gopuff"],
@@ -30,285 +32,351 @@ const CATEGORY_KEYWORDS = {
   "Cash": ["atm", "cash", "withdrawal", "cashback"],
 };
 
-// Common payment processor prefixes to strip for better matching
 const PAYMENT_PREFIXES = ["paypal *", "paypal*", "pp*", "pp *", "sq *", "sq*", "sqr*", "google *", "google*", "apple.com/bill", "amzn ", "amzn*", "amz*", "goog*", "msft*", "msft *", "izettle*", "sumup*", "sum up*", "stripe*", "zettle*"];
 
-// Normalise description for override lookups
-function normaliseDesc(desc) {
-  let d = desc.toLowerCase().trim();
-  for (const prefix of PAYMENT_PREFIXES) {
-    if (d.startsWith(prefix)) { d = d.slice(prefix.length).trim(); break; }
+const PAYMENT_TYPES = {
+  "BGC": { label: "Bank Giro Credit", icon: "\u{1F3E6}", type: "income" },
+  "BP": { label: "Bill Payment", icon: "\u{1F4CB}", type: "expense" },
+  "CHG": { label: "Charge", icon: "\u{26A0}\uFE0F", type: "expense" },
+  "CHQ": { label: "Cheque", icon: "\u{1F4DD}", type: "expense" },
+  "COR": { label: "Correction", icon: "\u{1F504}", type: "neutral" },
+  "CPT": { label: "Cashpoint", icon: "\u{1F3E7}", type: "expense" },
+  "CR": { label: "Credit", icon: "\u{2705}", type: "income" },
+  "DD": { label: "Direct Debit", icon: "\u{1F4C5}", type: "expense", recurring: true },
+  "DEB": { label: "Debit Card", icon: "\u{1F4B3}", type: "expense" },
+  "DEP": { label: "Deposit", icon: "\u{1F4E5}", type: "income" },
+  "DR": { label: "Debit", icon: "\u{1F534}", type: "expense" },
+  "FEE": { label: "Fixed Service Fee", icon: "\u{1F4B8}", type: "expense" },
+  "FPI": { label: "Faster Payment In", icon: "\u{26A1}", type: "income" },
+  "FPO": { label: "Faster Payment Out", icon: "\u{26A1}", type: "expense" },
+  "MPI": { label: "Mobile Payment In", icon: "\u{1F4F1}", type: "income" },
+  "MPO": { label: "Mobile Payment Out", icon: "\u{1F4F1}", type: "expense" },
+  "PAY": { label: "Payment", icon: "\u{1F4B7}", type: "expense" },
+  "SO": { label: "Standing Order", icon: "\u{1F501}", type: "expense", recurring: true },
+  "TFR": { label: "Transfer", icon: "\u{1F500}", type: "neutral" },
+};
+
+function detectPaymentType(description) {
+  if (!description) return null;
+  const upper = description.toUpperCase().trim();
+  // Check if the description starts with or contains a payment type code
+  // Common patterns: "DD NETFLIX", "SO MORTGAGE", "FPI JOHN SMITH", "DEB 25DEC TESCO"
+  for (const code of Object.keys(PAYMENT_TYPES)) {
+    // Match at start: "DD NETFLIX", "DD-NETFLIX"
+    if (upper.startsWith(code + " ") || upper.startsWith(code + "-") || upper.startsWith(code + "/")) return code;
+    // Match with date pattern: "DEB 25DEC"
+    if (upper.startsWith(code + " ")) return code;
+    // Match in common bank formats: ") DD ", " DD "
+    if (upper.includes(") " + code + " ") || upper.includes(" " + code + " ")) return code;
+    // Match at end after amount/ref: "NETFLIX DD"
+    if (upper.endsWith(" " + code)) return code;
   }
-  // Remove trailing reference numbers/dates
-  d = d.replace(/\s+\d{6,}$/, "").replace(/\s+\d{2}[\/\-]\d{2}[\/\-]?\d{0,4}$/, "").trim();
-  return d;
+  // Also check for specific bank format patterns
+  if (/\bD\/D\b/.test(upper) || /\bDIR(?:ECT)?\s*DEB(?:IT)?\b/.test(upper)) return "DD";
+  if (/\bS\/O\b/.test(upper) || /\bSTAND(?:ING)?\s*ORD(?:ER)?\b/.test(upper)) return "SO";
+  if (/\bFAST(?:ER)?\s*PAY(?:MENT)?\s*(?:IN|REC)\b/.test(upper)) return "FPI";
+  if (/\bFAST(?:ER)?\s*PAY(?:MENT)?\s*(?:OUT|SENT)\b/.test(upper)) return "FPO";
+  if (/\bBACS\b/.test(upper) || /\bCREDIT\b/.test(upper) && /\bBACS\b/.test(upper)) return "BGC";
+  if (/\bCARD\s*PAYMENT\b/.test(upper) || /\bCONTACTLESS\b/.test(upper) || /\bVISA\b/.test(upper)) return "DEB";
+  if (/\bCASH\s*(?:MACHINE|POINT|ATM|WITHDRAWAL)\b/.test(upper)) return "CPT";
+  if (/\bCHEQUE\b/.test(upper) || /\bCHQ\b/.test(upper)) return "CHQ";
+  if (/\bTRANSFER\b/.test(upper)) return "TFR";
+  if (/\bMOBILE\s*(?:PAYMENT|PAY)\b/.test(upper)) return upper.includes("IN") || upper.includes("REC") ? "MPI" : "MPO";
+  return null;
+}
+
+function normaliseDesc(desc) {
+  let normalized = desc.toLowerCase().trim();
+  for (const prefix of PAYMENT_PREFIXES) {
+    if (normalized.startsWith(prefix.toLowerCase())) {
+      normalized = normalized.substring(prefix.length).trim();
+      break;
+    }
+  }
+  // Remove trailing reference numbers (e.g., "NETFLIX CH8OP68ACS" -> "NETFLIX")
+  normalized = normalized.replace(/\s+[A-Z0-9]{6,}$/, "");
+  return normalized;
 }
 
 function categorize(description, overrides = {}) {
-  const lower = description.toLowerCase().trim();
-  const normKey = normaliseDesc(description);
-
-  // 1. Check user overrides first (self-learning)
-  if (overrides[normKey]) return overrides[normKey];
-  if (overrides[lower]) return overrides[lower];
-
-  // 2. Try matching the full description
-  for (const [cat, keywords] of Object.entries(CATEGORY_KEYWORDS)) {
-    if (keywords.some(kw => lower.includes(kw))) return cat;
-  }
-  // 3. Strip payment processor prefixes and try again
-  let stripped = lower;
-  for (const prefix of PAYMENT_PREFIXES) {
-    if (stripped.startsWith(prefix)) { stripped = stripped.slice(prefix.length).trim(); break; }
-  }
-  if (stripped !== lower) {
-    if (overrides[stripped]) return overrides[stripped];
-    for (const [cat, keywords] of Object.entries(CATEGORY_KEYWORDS)) {
-      if (keywords.some(kw => stripped.includes(kw))) return cat;
+  const normalized = normaliseDesc(description).toLowerCase();
+  if (overrides[normalized]) return overrides[normalized];
+  for (const [category, keywords] of Object.entries(CATEGORY_KEYWORDS)) {
+    for (const keyword of keywords) {
+      if (normalized.includes(keyword.toLowerCase())) {
+        return category;
+      }
     }
   }
-  // 4. PayPal fallback
-  if (lower.includes("paypal")) return "Shopping";
   return "Other";
 }
 
-// ─── CSV PARSER ───
 function splitCSVRow(line) {
   const result = [];
-  let current = "", inQuotes = false;
+  let current = "";
+  let inQuotes = false;
   for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (ch === '"') inQuotes = !inQuotes;
-    else if (ch === "," && !inQuotes) { result.push(current.trim()); current = ""; }
-    else current += ch;
+    const char = line[i];
+    if (char === '"') {
+      if (inQuotes && line[i + 1] === '"') {
+        current += '"';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (char === "," && !inQuotes) {
+      result.push(current);
+      current = "";
+    } else {
+      current += char;
+    }
   }
-  result.push(current.trim());
+  result.push(current);
   return result;
 }
 
 function parseCSV(text, overrides = {}) {
-  const lines = text.split("\n").filter(l => l.trim());
-  if (lines.length < 2) return [];
+  const lines = text.split("\n").filter((l) => l.trim());
+  if (lines.length === 0) return [];
 
-  const headerCols = splitCSVRow(lines[0]).map(h => h.toLowerCase().replace(/['"]/g, ""));
+  const firstRow = splitCSVRow(lines[0]);
+  const useHeaders =
+    firstRow.some((h) => h.toLowerCase().includes("date")) &&
+    firstRow.some((h) => h.toLowerCase().includes("amount"));
+
   const expenses = [];
+  const startIdx = useHeaders ? 1 : 0;
 
-  const dateIdx = headerCols.findIndex(h => /date/.test(h));
-  const descIdx = headerCols.findIndex(h => /description|narrative|details|memo|reference/.test(h));
-  const debitIdx = headerCols.findIndex(h => /debit|money\s*out|paid\s*out|withdrawal/.test(h));
-  const creditIdx = headerCols.findIndex(h => /credit|money\s*in|paid\s*in|deposit/.test(h));
-  const amountIdx = headerCols.findIndex(h => /^amount$|^value$/.test(h));
-  const useHeaders = descIdx >= 0;
+  for (let i = startIdx; i < lines.length; i++) {
+    const parts = splitCSVRow(lines[i]);
+    if (parts.length < 3) continue;
 
-  for (let i = 1; i < lines.length; i++) {
-    const cols = splitCSVRow(lines[i]);
-    if (cols.length < 3) continue;
-
-    let date = null, description = null, amount = null;
+    let date, description, amount;
 
     if (useHeaders) {
-      date = dateIdx >= 0 ? cols[dateIdx] : null;
-      description = cols[descIdx]?.replace(/^['"]|['"]$/g, "");
-
-      if (debitIdx >= 0) {
-        const debit = parseFloat((cols[debitIdx] || "").replace(/[\u00A3$,\s]/g, ""));
-        if (debit > 0) amount = debit;
-      } else if (amountIdx >= 0) {
-        const val = parseFloat((cols[amountIdx] || "").replace(/[\u00A3$,\s]/g, ""));
-        if (val && val < 0) amount = Math.abs(val);
-        else if (val && val > 0 && creditIdx < 0) amount = val;
-      }
+      const dateIdx = firstRow.findIndex((h) =>
+        h.toLowerCase().includes("date")
+      );
+      const descIdx = firstRow.findIndex((h) =>
+        h.toLowerCase().includes("description")
+      );
+      const amtIdx = firstRow.findIndex((h) =>
+        h.toLowerCase().includes("amount")
+      );
+      date = parts[dateIdx]?.trim() || "";
+      description = parts[descIdx]?.trim() || "";
+      amount = parseFloat(parts[amtIdx]?.replace(/[^0-9.-]/g, "")) || 0;
     } else {
-      for (let j = 0; j < cols.length; j++) {
-        const val = cols[j];
-        if (!date && /\d{1,4}[\/-]\d{1,2}[\/-]\d{1,4}/.test(val)) date = val;
-        else if (!amount && /^-?[\u00A3$]?\d+[.,]\d{2}$/.test(val.replace(/[\u00A3$,\s]/g, ""))) {
-          const num = parseFloat(val.replace(/[\u00A3$,\s]/g, ""));
-          amount = Math.abs(num);
-        }
-        else if (!description && val.length > 2 && !/^\d+[.,]?\d*$/.test(val)) description = val;
-      }
+      date = parts[0]?.trim() || "";
+      description = parts[1]?.trim() || "";
+      amount = parseFloat(parts[2]?.replace(/[^0-9.-]/g, "")) || 0;
     }
 
-    if (description && amount && amount > 0) {
-      expenses.push({
-        id: crypto.randomUUID(),
-        date: date || new Date().toISOString().split("T")[0],
-        description,
-        amount: parseFloat(amount.toFixed(2)),
-        category: categorize(description, overrides),
-        source: "csv",
-      });
-    }
+    if (!date || !description || !amount) continue;
+
+    expenses.push({
+      id: `${Date.now()}-${Math.random()}`,
+      date,
+      description,
+      amount: Math.abs(amount),
+      category: categorize(description, overrides),
+      source: "csv",
+      paymentType: detectPaymentType(description),
+    });
   }
+
   return expenses;
 }
 
-// ─── PDF TEXT PARSER ───
-async function parsePDFText(file, overrides = {}) {
-  const pdfjsLib = await import("pdfjs-dist");
-  pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
-
-  const arrayBuffer = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-  let fullText = "";
-
-  for (let i = 1; i <= pdf.numPages; i++) {
-    const page = await pdf.getPage(i);
-    const content = await page.getTextContent();
-    const items = content.items.filter(item => item.str.trim());
-    const lineMap = {};
-    items.forEach(item => {
-      const y = Math.round(item.transform[5]);
-      if (!lineMap[y]) lineMap[y] = [];
-      lineMap[y].push({ x: item.transform[4], text: item.str });
-    });
-    const sortedLines = Object.entries(lineMap)
-      .sort(([a], [b]) => Number(b) - Number(a))
-      .map(([, items]) => items.sort((a, b) => a.x - b.x).map(i => i.text).join("  "));
-    fullText += sortedLines.join("\n") + "\n";
-  }
-
+function parsePDFText(file, overrides = {}) {
   const expenses = [];
-  const lines = fullText.split("\n");
+  const lines = file.split("\n");
 
   for (const line of lines) {
-    const lloydsMatch = line.match(/(\d{1,2}\s+\w{3}\s+\d{2,4})\s{2,}(.+?)\s{2,}(?:DEB|DD|SO|BP|FPI|TFR|BGC|FPO|DEP|ATM)\s{2,}(?:[\d,]+\.\d{2}\s{2,})?(\d[\d,]*\.\d{2})\s{2,}[\d,]+\.\d{2}/);
-    if (lloydsMatch) {
-      const [, date, desc, moneyOut] = lloydsMatch;
-      const amount = parseFloat(moneyOut.replace(/,/g, ""));
-      if (amount > 0 && desc.trim().length > 1) {
-        expenses.push({
-          id: crypto.randomUUID(), date: date.trim(), description: desc.trim(),
-          amount: parseFloat(amount.toFixed(2)), category: categorize(desc, overrides), source: "pdf",
-        });
-        continue;
-      }
-    }
+    // Lloyds bank format: Date (2 cols) | Description | Type | Debit | Balance
+    const lloydsMatch = line.match(
+      /(\d{1,2}\s+\w{3}\s+\d{2,4})\s{2,}(.+?)\s{2,}(DEB|DD|SO|BP|FPI|TFR|BGC|FPO|DEP|ATM|CPT|CHQ|CHG|FEE|CR|DR|PAY|MPI|MPO|COR)\s{2,}(?:[\d,]+\.\d{2}\s{2,})?(\d[\d,]*\.\d{2})\s{2,}[\d,]+\.\d{2}/
+    );
 
-    const match = line.match(/(\d{1,2}[\/-]\w{3}[\/-]?\d{0,4}|\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4})\s+(.+?)\s+([\u00A3$]?\d+[.,]\d{2})\s*$/);
-    if (match) {
-      const [, date, desc, amt] = match;
-      const amount = parseFloat(amt.replace(/[\u00A3$,]/g, ""));
-      if (amount > 0 && desc.trim().length > 1) {
+    if (lloydsMatch) {
+      const date = lloydsMatch[1];
+      const desc = lloydsMatch[2];
+      const paymentType = lloydsMatch[3];
+      const amount = parseFloat(lloydsMatch[4].replace(/,/g, ""));
+
+      expenses.push({
+        id: `${Date.now()}-${Math.random()}`,
+        date,
+        description: desc,
+        amount,
+        category: categorize(desc, overrides),
+        source: "pdf",
+        paymentType,
+      });
+    } else {
+      // Generic attempt
+      const match = line.match(
+        /(\d{1,2}\/\d{1,2}\/\d{2,4}|\d{1,2}\s+\w{3})\s+(.+?)\s+([\d,]+\.\d{2})/
+      );
+      if (match) {
+        const date = match[1];
+        const desc = match[2];
+        const amount = parseFloat(match[3].replace(/,/g, ""));
+
         expenses.push({
-          id: crypto.randomUUID(), date, description: desc.trim(),
-          amount: parseFloat(amount.toFixed(2)), category: categorize(desc, overrides), source: "pdf",
+          id: `${Date.now()}-${Math.random()}`,
+          date,
+          description: desc,
+          amount,
+          category: categorize(desc, overrides),
+          source: "pdf",
+          paymentType: detectPaymentType(desc),
         });
       }
     }
   }
-  return { expenses, rawText: fullText };
+
+  return expenses;
 }
 
-// ─── RECEIPT OCR PARSER (Tesseract.js) ───
 function extractReceiptData(ocrText) {
-  const lines = ocrText.split("\n").map(l => l.trim()).filter(Boolean);
-  let merchant = null, total = null, date = null;
+  const lines = ocrText.split("\n");
+  let total = null;
+  let merchant = null;
+  let date = null;
 
-  for (const line of lines.slice(0, 5)) {
-    const clean = line.replace(/[^a-zA-Z0-9\s&'.-]/g, "").trim();
-    if (clean.length > 2 && clean.length < 60 && !/^\d+$/.test(clean) && !/tel|phone|fax|vat|reg/i.test(clean)) {
-      merchant = clean; break;
-    }
-  }
-
-  const totalPatterns = [
-    /(?:total|amount\s*due|balance\s*due|grand\s*total|to\s*pay|card\s*payment|debit\s*card|visa|mastercard|contactless)\s*[:\s]*£?\s*(\d+[.,]\d{2})/i,
-    /£\s*(\d+[.,]\d{2})\s*(?:total|due|paid)/i,
-  ];
-  for (const line of lines.reverse()) {
-    for (const pattern of totalPatterns) {
-      const match = line.match(pattern);
-      if (match) { total = parseFloat(match[1].replace(",", ".")); break; }
-    }
-    if (total) break;
-  }
-  if (!total) {
-    let maxAmt = 0;
-    for (const line of lines) {
-      const amts = [...line.matchAll(/£\s*(\d+[.,]\d{2})/g)];
-      for (const m of amts) { const v = parseFloat(m[1].replace(",", ".")); if (v > maxAmt) maxAmt = v; }
-    }
-    if (maxAmt > 0) total = maxAmt;
-  }
-
-  const datePatterns = [/(\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4})/, /(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s+\d{2,4})/i];
   for (const line of lines) {
-    for (const pattern of datePatterns) { const match = line.match(pattern); if (match) { date = match[1]; break; } }
-    if (date) break;
+    const trimmed = line.trim();
+
+    if (!total) {
+      const totalMatch = trimmed.match(/(?:total|amount|price):\s*[\$Â£â¬]?\s*([\d.]+)/i);
+      if (totalMatch) total = parseFloat(totalMatch[1]);
+    }
+
+    const dateMatch = trimmed.match(
+      /(\d{1,2}\/\d{1,2}\/\d{2,4}|\d{1,2}\s+\w{3}\s+\d{2,4})/
+    );
+    if (dateMatch && !date) date = dateMatch[1];
+
+    if (!merchant && trimmed.length > 5 && trimmed.length < 50) {
+      const upper = trimmed.toUpperCase();
+      if (
+        !upper.includes("TOTAL") &&
+        !upper.includes("PRICE") &&
+        !upper.includes("SUBTOTAL") &&
+        !upper.includes("TAX") &&
+        !upper.match(/^\d/)
+      ) {
+        merchant = trimmed;
+      }
+    }
   }
 
-  return { merchant, total, date };
+  return { total: total || 0, merchant: merchant || "Receipt", date: date || new Date().toLocaleDateString() };
 }
 
 async function parseReceiptImage(file, onProgress, overrides = {}) {
-  const Tesseract = await import("tesseract.js");
-  const imageUrl = URL.createObjectURL(file);
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = async () => {
+      try {
+        const Tesseract = window.Tesseract;
+        if (!Tesseract) {
+          resolve([]);
+          return;
+        }
 
-  try {
-    const result = await Tesseract.recognize(imageUrl, "eng", {
-      logger: (m) => { if (m.status === "recognizing text" && onProgress) onProgress(Math.round(m.progress * 100)); },
-    });
+        const { createWorker } = Tesseract;
+        const worker = await createWorker();
+        const {
+          data: { text },
+        } = await worker.recognize(reader.result);
+        await worker.terminate();
 
-    const ocrText = result.data.text;
-    const extracted = extractReceiptData(ocrText);
+        const { total, merchant, date } = extractReceiptData(text);
 
-    const expenses = [];
-    if (extracted.total && extracted.total > 0) {
-      expenses.push({
-        id: crypto.randomUUID(),
-        date: extracted.date || new Date().toISOString().split("T")[0],
-        description: extracted.merchant || "Receipt purchase",
-        amount: parseFloat(extracted.total.toFixed(2)),
-        category: extracted.merchant ? categorize(extracted.merchant, overrides) : "Other",
-        source: "receipt",
-      });
-    }
-
-    const imageData = await new Promise((resolve) => {
-      const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.readAsDataURL(file);
-    });
-
-    return { imageData, expenses, rawText: ocrText, extracted };
-  } finally { URL.revokeObjectURL(imageUrl); }
+        resolve([
+          {
+            id: `${Date.now()}-${Math.random()}`,
+            date,
+            description: merchant,
+            amount: total,
+            category: categorize(merchant, overrides),
+            source: "receipt",
+            paymentType: null,
+          },
+        ]);
+      } catch {
+        resolve([]);
+      }
+    };
+    reader.readAsDataURL(file);
+  });
 }
 
-// ─── MONTH HELPERS ───
 function parseUKDate(dateStr) {
-  if (!dateStr) return new Date();
-  const s = dateStr.trim();
-  const dmy = s.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{2,4})$/);
-  if (dmy) {
-    const [, d, m, y] = dmy;
-    const year = y.length === 2 ? 2000 + parseInt(y) : parseInt(y);
-    return new Date(year, parseInt(m) - 1, parseInt(d));
+  const patterns = [
+    /(\d{1,2})\s+(\w+)\s+(\d{4})/,
+    /(\d{1,2})\/(\d{1,2})\/(\d{2,4})/,
+    /(\d{4})-(\d{2})-(\d{2})/,
+  ];
+
+  const months = {
+    jan: 0, january: 0,
+    feb: 1, february: 1,
+    mar: 2, march: 2,
+    apr: 3, april: 3,
+    may: 4,
+    jun: 5, june: 5,
+    jul: 6, july: 6,
+    aug: 7, august: 7,
+    sep: 8, sept: 8, september: 8,
+    oct: 9, october: 9,
+    nov: 10, november: 10,
+    dec: 11, december: 11,
+  };
+
+  for (const pattern of patterns) {
+    const match = dateStr.match(pattern);
+    if (!match) continue;
+
+    if (pattern === patterns[0]) {
+      const day = parseInt(match[1]);
+      const month = months[match[2].toLowerCase()];
+      const year = parseInt(match[3]);
+      if (month !== undefined) return new Date(year, month, day);
+    } else if (pattern === patterns[1]) {
+      const day = parseInt(match[1]);
+      const month = parseInt(match[2]) - 1;
+      let year = parseInt(match[3]);
+      if (year < 100) year += year < 50 ? 2000 : 1900;
+      return new Date(year, month, day);
+    } else if (pattern === patterns[2]) {
+      const year = parseInt(match[1]);
+      const month = parseInt(match[2]) - 1;
+      const day = parseInt(match[3]);
+      return new Date(year, month, day);
+    }
   }
-  const dmy2 = s.match(/^(\d{1,2})\s+(\w{3})\s+(\d{2,4})$/);
-  if (dmy2) {
-    const [, d, mName, y] = dmy2;
-    const months = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
-    const year = y.length === 2 ? 2000 + parseInt(y) : parseInt(y);
-    return new Date(year, months[mName.toLowerCase()] ?? 0, parseInt(d));
-  }
-  const d = new Date(s);
-  return isNaN(d) ? new Date() : d;
+
+  throw new Error("Invalid date format");
 }
 
 function getMonthKey(dateStr) {
-  try { const d = parseUKDate(dateStr); if (isNaN(d)) return new Date().toISOString().slice(0, 7); return d.toISOString().slice(0, 7); }
-  catch { return new Date().toISOString().slice(0, 7); }
+  const date = parseUKDate(dateStr);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
 }
 
 function formatMonth(key) {
-  const [y, m] = key.split("-");
-  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-  return `${months[parseInt(m) - 1]} ${y}`;
+  const [year, month] = key.split("-");
+  const date = new Date(parseInt(year), parseInt(month) - 1);
+  return date.toLocaleDateString("en-GB", { year: "numeric", month: "long" });
 }
 
-function formatCurrency(n) { return `\u00A3${n.toFixed(2)}`; }
+function formatCurrency(n) {
+  return "Â£" + n.toFixed(2);
+}
 
-// ─── MAIN APP ───
 export default function App() {
   const [user, setUser] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
@@ -317,695 +385,1039 @@ export default function App() {
   const [receipts, setReceipts] = useState([]);
   const [categoryOverrides, setCategoryOverrides] = useState({});
   const [activeTab, setActiveTab] = useState("dashboard");
-  const [syncStatus, setSyncStatus] = useState(null);
+  const [syncStatus, setSyncStatus] = useState("idle");
   const [showAddModal, setShowAddModal] = useState(false);
-  const [addModalType, setAddModalType] = useState("expense"); // "expense" or "income"
-  const [selectedMonth, setSelectedMonth] = useState("all");
+  const [addModalType, setAddModalType] = useState("expense");
+  const [selectedMonth, setSelectedMonth] = useState(() => {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  });
   const [editingId, setEditingId] = useState(null);
   const [importResult, setImportResult] = useState(null);
-  const [ocrProgress, setOcrProgress] = useState(null);
-  const [drillCategory, setDrillCategory] = useState(null); // category drill-down
+  const [ocrProgress, setOcrProgress] = useState(0);
+  const [drillCategory, setDrillCategory] = useState(null);
   const [savingsBalance, setSavingsBalance] = useState(0);
+  const [editingRecurringDate, setEditingRecurringDate] = useState(null);
 
-  const isFromCloud = useRef(false);
-  const userRef = useRef(null);
-  const overridesRef = useRef({});
-
-  // Keep overridesRef in sync
-  useEffect(() => { overridesRef.current = categoryOverrides; }, [categoryOverrides]);
-
-  // ─── AUTH ───
+  // Auth
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, (u) => { setUser(u); userRef.current = u; setAuthLoading(false); });
-    return unsub;
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      setAuthLoading(false);
+    });
+    return unsubscribe;
   }, []);
 
-  const handleSignIn = async () => { try { await signInWithPopup(auth, googleProvider); } catch (e) { console.error(e); } };
-  const handleSignOut = async () => { try { await signOut(auth); setSyncStatus(null); } catch (e) { console.error(e); } };
-
-  // ─── FIRESTORE SYNC (listen) ───
+  // Sync to Firestore
   useEffect(() => {
     if (!user) return;
-    const unsub = onSnapshot(doc(db, "pennytrack_users", user.uid), (snap) => {
-      if (snap.exists()) {
-        const data = snap.data();
-        isFromCloud.current = true;
+    setSyncStatus("syncing");
+    const docRef = doc(db, "users", user.uid);
+    setDoc(
+      docRef,
+      {
+        expenses,
+        incomes,
+        receipts,
+        categoryOverrides,
+        savingsBalance,
+        lastUpdated: new Date(),
+      },
+      { merge: true }
+    )
+      .then(() => setSyncStatus("idle"))
+      .catch(() => setSyncStatus("error"));
+  }, [user, expenses, incomes, receipts, categoryOverrides, savingsBalance]);
+
+  // Sync from Firestore
+  useEffect(() => {
+    if (!user) return;
+    const docRef = doc(db, "users", user.uid);
+    const unsubscribe = onSnapshot(docRef, (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
         if (data.expenses) setExpenses(data.expenses);
         if (data.incomes) setIncomes(data.incomes);
         if (data.receipts) setReceipts(data.receipts);
         if (data.categoryOverrides) setCategoryOverrides(data.categoryOverrides);
         if (data.savingsBalance !== undefined) setSavingsBalance(data.savingsBalance);
-        setSyncStatus("synced");
       }
     });
-    return unsub;
+    return unsubscribe;
   }, [user]);
 
-  // ─── SAVE TO FIRESTORE ───
+  // localStorage backup
   useEffect(() => {
-    try { localStorage.setItem("pennytrack_expenses", JSON.stringify(expenses)); } catch {}
-    try { localStorage.setItem("pennytrack_incomes", JSON.stringify(incomes)); } catch {}
-    try { localStorage.setItem("pennytrack_receipts", JSON.stringify(receipts)); } catch {}
-    try { localStorage.setItem("pennytrack_overrides", JSON.stringify(categoryOverrides)); } catch {}
-    try { localStorage.setItem("pennytrack_savings", JSON.stringify(savingsBalance)); } catch {}
-
-    if (userRef.current) {
-      if (isFromCloud.current) { isFromCloud.current = false; return; }
-      setSyncStatus("saving...");
-      const timeout = setTimeout(() => {
-        const receiptsForCloud = receipts.map(r => ({ ...r, imageData: undefined }));
-        setDoc(doc(db, "pennytrack_users", userRef.current.uid), {
-          expenses, incomes, receipts: receiptsForCloud, categoryOverrides, savingsBalance,
-          updatedAt: new Date().toISOString(),
-        }, { merge: true })
-          .then(() => setSyncStatus("synced"))
-          .catch(() => setSyncStatus("error"));
-      }, 500);
-      return () => clearTimeout(timeout);
-    }
+    localStorage.setItem("pennytrack_expenses", JSON.stringify(expenses));
+    localStorage.setItem("pennytrack_incomes", JSON.stringify(incomes));
+    localStorage.setItem("pennytrack_receipts", JSON.stringify(receipts));
+    localStorage.setItem("pennytrack_overrides", JSON.stringify(categoryOverrides));
+    localStorage.setItem("pennytrack_savings", JSON.stringify(savingsBalance));
   }, [expenses, incomes, receipts, categoryOverrides, savingsBalance]);
 
-  // ─── LOAD LOCAL ON MOUNT ───
+  // Load from localStorage if no user
   useEffect(() => {
-    try { const saved = localStorage.getItem("pennytrack_expenses"); if (saved) setExpenses(JSON.parse(saved)); } catch {}
-    try { const saved = localStorage.getItem("pennytrack_incomes"); if (saved) setIncomes(JSON.parse(saved)); } catch {}
-    try { const saved = localStorage.getItem("pennytrack_receipts"); if (saved) setReceipts(JSON.parse(saved)); } catch {}
-    try { const saved = localStorage.getItem("pennytrack_overrides"); if (saved) setCategoryOverrides(JSON.parse(saved)); } catch {}
-    try { const saved = localStorage.getItem("pennytrack_savings"); if (saved) setSavingsBalance(JSON.parse(saved)); } catch {}
-  }, []);
+    if (user) return;
+    const stored = localStorage.getItem("pennytrack_expenses");
+    const storedIncomes = localStorage.getItem("pennytrack_incomes");
+    const storedOverrides = localStorage.getItem("pennytrack_overrides");
+    const storedSavings = localStorage.getItem("pennytrack_savings");
+    if (stored) setExpenses(JSON.parse(stored));
+    if (storedIncomes) setIncomes(JSON.parse(storedIncomes));
+    if (storedOverrides) setCategoryOverrides(JSON.parse(storedOverrides));
+    if (storedSavings) setSavingsBalance(JSON.parse(storedSavings));
+  }, [user]);
 
-  // ─── EXPENSE OPERATIONS ───
-  const addExpense = useCallback((expense) => { setExpenses(prev => [expense, ...prev]); }, []);
-  const deleteExpense = useCallback((id) => { setExpenses(prev => prev.filter(e => e.id !== id)); }, []);
+  const tabs = [
+    { id: "dashboard", label: "Dashboard", icon: "\u{1F4CA}" },
+    { id: "expenses", label: "Expenses", icon: "\u{1F4B5}" },
+    { id: "income", label: "Income", icon: "\u{1F4B0}" },
+    { id: "recurring", label: "Recurring", icon: "\u{1F501}" },
+    { id: "import", label: "Import", icon: "\u{1F4C1}" },
+  ];
 
-  const updateExpense = useCallback((id, updates) => {
-    setExpenses(prev => {
-      const expense = prev.find(e => e.id === id);
-      if (expense && updates.category && updates.category !== expense.category) {
-        // Self-learning: remember this category choice for similar descriptions
-        const normKey = normaliseDesc(expense.description);
-        setCategoryOverrides(ov => ({ ...ov, [normKey]: updates.category }));
-      }
-      return prev.map(e => e.id === id ? { ...e, ...updates } : e);
-    });
-    setEditingId(null);
-  }, []);
+  // Filter by month
+  const filteredExpenses = useMemo(
+    () => expenses.filter((e) => getMonthKey(e.date) === selectedMonth),
+    [expenses, selectedMonth]
+  );
 
-  // ─── INCOME OPERATIONS ───
-  const addIncome = useCallback((income) => { setIncomes(prev => [income, ...prev]); }, []);
-  const deleteIncome = useCallback((id) => { setIncomes(prev => prev.filter(e => e.id !== id)); }, []);
+  const filteredIncomes = useMemo(
+    () => incomes.filter((i) => getMonthKey(i.date) === selectedMonth),
+    [incomes, selectedMonth]
+  );
 
-  // ─── RE-CATEGORISE ALL (apply overrides to existing transactions) ───
-  const recategoriseAll = useCallback(() => {
-    setExpenses(prev => prev.map(e => ({
-      ...e,
-      category: categorize(e.description, overridesRef.current),
-    })));
-  }, []);
-
-  // ─── COMPUTED DATA ───
-  const filteredExpenses = useMemo(() => {
-    if (selectedMonth === "all") return expenses;
-    return expenses.filter(e => getMonthKey(e.date) === selectedMonth);
-  }, [expenses, selectedMonth]);
-
-  const filteredIncomes = useMemo(() => {
-    if (selectedMonth === "all") return incomes;
-    return incomes.filter(e => getMonthKey(e.date) === selectedMonth);
-  }, [incomes, selectedMonth]);
-
+  // Available months
   const availableMonths = useMemo(() => {
-    const months = new Set([
-      ...expenses.map(e => getMonthKey(e.date)),
-      ...incomes.map(e => getMonthKey(e.date)),
-    ]);
+    const months = new Set();
+    expenses.forEach((e) => months.add(getMonthKey(e.date)));
+    incomes.forEach((i) => months.add(getMonthKey(i.date)));
     return Array.from(months).sort().reverse();
   }, [expenses, incomes]);
 
-  const totalSpent = useMemo(() => filteredExpenses.reduce((s, e) => s + e.amount, 0), [filteredExpenses]);
-  const totalIncome = useMemo(() => filteredIncomes.reduce((s, e) => s + e.amount, 0), [filteredIncomes]);
-  const netAmount = useMemo(() => totalIncome - totalSpent, [totalIncome, totalSpent]);
+  // Totals
+  const totalSpent = useMemo(
+    () => filteredExpenses.reduce((sum, e) => sum + e.amount, 0),
+    [filteredExpenses]
+  );
 
+  const totalIncome = useMemo(
+    () => filteredIncomes.reduce((sum, i) => sum + i.amount, 0),
+    [filteredIncomes]
+  );
+
+  const netAmount = totalIncome - totalSpent;
+
+  // Category breakdown
   const categoryBreakdown = useMemo(() => {
-    const map = {};
-    filteredExpenses.forEach(e => { map[e.category] = (map[e.category] || 0) + e.amount; });
-    return Object.entries(map)
-      .map(([name, value]) => ({ name, value: parseFloat(value.toFixed(2)), color: CATEGORIES[name]?.color || "#9ca3af" }))
+    const breakdown = {};
+    filteredExpenses.forEach((e) => {
+      breakdown[e.category] = (breakdown[e.category] || 0) + e.amount;
+    });
+    return Object.entries(breakdown)
+      .map(([name, amount]) => ({
+        name,
+        value: parseFloat(amount.toFixed(2)),
+        icon: CATEGORIES[name]?.icon || "\u{1F4E6}",
+        color: CATEGORIES[name]?.color || "#9ca3af",
+      }))
       .sort((a, b) => b.value - a.value);
   }, [filteredExpenses]);
 
+  // Monthly trend
   const monthlyTrend = useMemo(() => {
-    const map = {};
-    expenses.forEach(e => { const key = getMonthKey(e.date); map[key] = (map[key] || { spent: 0, income: 0 }); map[key].spent += e.amount; });
-    incomes.forEach(e => { const key = getMonthKey(e.date); map[key] = (map[key] || { spent: 0, income: 0 }); map[key].income += e.amount; });
-    return Object.entries(map)
+    const trend = {};
+    expenses.forEach((e) => {
+      const key = getMonthKey(e.date);
+      trend[key] = (trend[key] || 0) + e.amount;
+    });
+    return Object.entries(trend)
       .sort(([a], [b]) => a.localeCompare(b))
       .slice(-6)
-      .map(([month, data]) => ({ month: formatMonth(month), spent: parseFloat(data.spent.toFixed(2)), income: parseFloat(data.income.toFixed(2)) }));
-  }, [expenses, incomes]);
+      .map(([month, amount]) => ({
+        month: formatMonth(month).split(" ")[0],
+        spending: parseFloat(amount.toFixed(2)),
+      }));
+  }, [expenses]);
 
+  // Top merchants
   const topMerchants = useMemo(() => {
-    const map = {};
-    filteredExpenses.forEach(e => { const key = e.description.substring(0, 30); map[key] = (map[key] || 0) + e.amount; });
-    return Object.entries(map).sort(([, a], [, b]) => b - a).slice(0, 5)
-      .map(([name, total]) => ({ name, total: parseFloat(total.toFixed(2)) }));
+    const merchants = {};
+    filteredExpenses.forEach((e) => {
+      const key = normaliseDesc(e.description);
+      merchants[key] = (merchants[key] || 0) + e.amount;
+    });
+    return Object.entries(merchants)
+      .map(([name, amount]) => ({ name, amount: parseFloat(amount.toFixed(2)) }))
+      .sort((a, b) => b.amount - a.amount)
+      .slice(0, 5);
   }, [filteredExpenses]);
 
-  // Drill-down expenses for selected category
+  // Recurring transactions
+  const recurringTransactions = useMemo(() => {
+    const map = {};
+    expenses.forEach((e) => {
+      if (e.paymentType === "DD" || e.paymentType === "SO") {
+        const key = normaliseDesc(e.description);
+        if (!map[key]) {
+          map[key] = {
+            description: e.description,
+            paymentType: e.paymentType,
+            amounts: [],
+            dates: [],
+            category: e.category,
+            lastDate: e.date,
+          };
+        }
+        map[key].amounts.push(e.amount);
+        map[key].dates.push(e.date);
+        // Track the most recent date
+        try {
+          if (parseUKDate(e.date) > parseUKDate(map[key].lastDate)) {
+            map[key].lastDate = e.date;
+          }
+        } catch {}
+      }
+    });
+    return Object.entries(map).map(([key, data]) => ({
+      key,
+      description: data.description,
+      paymentType: data.paymentType,
+      category: data.category,
+      avgAmount: parseFloat((data.amounts.reduce((s, a) => s + a, 0) / data.amounts.length).toFixed(2)),
+      lastAmount: data.amounts[data.amounts.length - 1],
+      lastDate: data.lastDate,
+      count: data.amounts.length,
+      // Try to detect the day of month
+      dayOfMonth: (() => {
+        try {
+          const d = parseUKDate(data.lastDate);
+          return d.getDate();
+        } catch { return null; }
+      })(),
+    })).sort((a, b) => b.avgAmount - a.avgAmount);
+  }, [expenses]);
+
+  // Drill category
   const drillExpenses = useMemo(() => {
     if (!drillCategory) return [];
-    return filteredExpenses.filter(e => e.category === drillCategory).sort((a, b) => new Date(b.date) - new Date(a.date));
+    return filteredExpenses.filter((e) => e.category === drillCategory);
   }, [filteredExpenses, drillCategory]);
 
-  // ─── FILE IMPORT HANDLER ───
-  const handleFileImport = async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    setImportResult({ status: "processing", message: "Reading file..." });
-
+  // Login
+  const handleLogin = async () => {
     try {
-      let result;
-      if (file.name.endsWith(".csv") || file.name.endsWith(".tsv")) {
-        const text = await file.text();
-        const parsed = parseCSV(text, overridesRef.current);
-        result = { count: parsed.length, expenses: parsed };
-      } else if (file.name.endsWith(".pdf")) {
-        const parsed = await parsePDFText(file, overridesRef.current);
-        result = { count: parsed.expenses.length, expenses: parsed.expenses, rawText: parsed.rawText };
-      } else if (file.type?.startsWith("image/")) {
-        setImportResult({ status: "processing", message: "Reading receipt..." });
-        setOcrProgress(0);
-        const parsed = await parseReceiptImage(file, (p) => setOcrProgress(p), overridesRef.current);
-        setOcrProgress(null);
-        setReceipts(prev => [...prev, { id: crypto.randomUUID(), imageData: parsed.imageData, date: new Date().toISOString(), fileName: file.name }]);
-        if (parsed.expenses.length > 0) {
-          setExpenses(prev => [...parsed.expenses, ...prev]);
-          const ex = parsed.expenses[0];
-          setImportResult({ status: "success", message: `Receipt scanned! Added "${ex.description}" for ${formatCurrency(ex.amount)}` });
-        } else {
-          setImportResult({ status: "warning", message: "Receipt saved but couldn't extract the total automatically. You can add it manually." });
-        }
-        return;
-      } else {
-        setImportResult({ status: "error", message: "Unsupported file type. Use CSV, PDF, or image files." });
-        return;
-      }
-
-      if (result.expenses.length > 0) {
-        setExpenses(prev => [...result.expenses, ...prev]);
-        setImportResult({ status: "success", message: `Imported ${result.count} transactions!` });
-      } else {
-        setImportResult({ status: "warning", message: `Couldn't detect transactions automatically. ${result.rawText ? "PDF text was extracted but no transaction patterns found." : "Check your CSV format."}` });
-      }
-    } catch (err) {
-      console.error(err);
-      setImportResult({ status: "error", message: "Error reading file: " + err.message });
+      await signInWithPopup(auth, googleProvider);
+    } catch (error) {
+      console.error("Login error:", error);
     }
-
-    e.target.value = "";
   };
 
-  // ─── ADD MODAL (Expense or Income) ───
-  const AddModal = () => {
-    const isIncome = addModalType === "income";
-    const [desc, setDesc] = useState("");
-    const [amount, setAmount] = useState("");
-    const [category, setCategory] = useState(isIncome ? "" : "Other");
-    const [date, setDate] = useState(new Date().toISOString().split("T")[0]);
+  // Logout
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+      setExpenses([]);
+      setIncomes([]);
+    } catch (error) {
+      console.error("Logout error:", error);
+    }
+  };
 
-    const handleSubmit = (e) => {
-      e.preventDefault();
-      if (!desc.trim() || !amount) return;
-      if (isIncome) {
-        addIncome({
-          id: crypto.randomUUID(), description: desc.trim(),
-          amount: parseFloat(parseFloat(amount).toFixed(2)), date, source: "manual",
+  // CRUD
+  const addExpense = useCallback((expense) => {
+    setExpenses((prev) => [...prev, { ...expense, id: `${Date.now()}-${Math.random()}` }]);
+    setShowAddModal(false);
+  }, []);
+
+  const addIncome = useCallback((income) => {
+    setIncomes((prev) => [...prev, { ...income, id: `${Date.now()}-${Math.random()}` }]);
+    setShowAddModal(false);
+  }, []);
+
+  const editExpense = useCallback((id, updates) => {
+    setExpenses((prev) => prev.map((e) => (e.id === id ? { ...e, ...updates } : e)));
+    setEditingId(null);
+  }, []);
+
+  const deleteExpense = useCallback((id) => {
+    setExpenses((prev) => prev.filter((e) => e.id !== id));
+    setEditingId(null);
+  }, []);
+
+  const deleteIncome = useCallback((id) => {
+    setIncomes((prev) => prev.filter((i) => i.id !== id));
+    setEditingId(null);
+  }, []);
+
+  const importExpenses = useCallback((newExpenses) => {
+    setExpenses((prev) => [...prev, ...newExpenses]);
+  }, []);
+
+  if (authLoading) return <div className="flex items-center justify-center h-screen">{"\u231B"}</div>;
+
+  // ============ COMPONENTS ============
+
+  function AddModal() {
+    const [date, setDate] = useState(new Date().toISOString().split("T")[0]);
+    const [description, setDescription] = useState("");
+    const [amount, setAmount] = useState("");
+    const [category, setCategory] = useState("Other");
+
+    const handleAdd = () => {
+      if (!description || !amount) return;
+      if (addModalType === "expense") {
+        addExpense({
+          date: (() => {
+            const d = new Date(date);
+            return `${d.getDate()} ${d.toLocaleDateString("en-GB", { month: "short" }).split(" ")[0]} ${d.getFullYear()}`;
+          })(),
+          description,
+          amount: parseFloat(amount),
+          category,
+          source: "manual",
+          paymentType: null,
         });
       } else {
-        addExpense({
-          id: crypto.randomUUID(), description: desc.trim(),
-          amount: parseFloat(parseFloat(amount).toFixed(2)),
-          category: categorize(desc, overridesRef.current) !== "Other" ? categorize(desc, overridesRef.current) : category,
-          date, source: "manual",
+        addIncome({
+          date: (() => {
+            const d = new Date(date);
+            return `${d.getDate()} ${d.toLocaleDateString("en-GB", { month: "short" }).split(" ")[0]} ${d.getFullYear()}`;
+          })(),
+          description,
+          amount: parseFloat(amount),
+          source: "manual",
+          paymentType: null,
         });
       }
-      setShowAddModal(false);
     };
 
     return (
-      <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setShowAddModal(false)}>
-        <div className="bg-white rounded-2xl p-6 w-full max-w-md shadow-xl" onClick={e => e.stopPropagation()}>
-          <h2 className="text-lg font-bold text-gray-900 mb-4">{isIncome ? "Add Income" : "Add Expense"}</h2>
-          {/* Toggle between expense/income */}
-          <div className="flex gap-1 mb-4 bg-gray-100 rounded-xl p-1">
-            <button type="button" onClick={() => setAddModalType("expense")}
-              className={`flex-1 py-2 text-xs font-medium rounded-lg transition-all ${!isIncome ? "bg-white text-violet-700 shadow-sm" : "text-gray-500"}`}>Expense</button>
-            <button type="button" onClick={() => setAddModalType("income")}
-              className={`flex-1 py-2 text-xs font-medium rounded-lg transition-all ${isIncome ? "bg-white text-emerald-700 shadow-sm" : "text-gray-500"}`}>Income</button>
+      <div className="fixed inset-0 bg-black/50 flex items-end z-50">
+        <div className="bg-white w-full rounded-t-3xl p-6 space-y-4">
+          <h3 className="text-xl font-bold">Add {addModalType === "expense" ? "Expense" : "Income"}</h3>
+          <input
+            type="date"
+            value={date}
+            onChange={(e) => setDate(e.target.value)}
+            className="w-full border rounded-lg px-4 py-2"
+          />
+          <input
+            type="text"
+            placeholder="Description"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            className="w-full border rounded-lg px-4 py-2"
+          />
+          {addModalType === "expense" && (
+            <select
+              value={category}
+              onChange={(e) => setCategory(e.target.value)}
+              className="w-full border rounded-lg px-4 py-2"
+            >
+              {Object.keys(CATEGORIES).map((cat) => (
+                <option key={cat} value={cat}>{cat}</option>
+              ))}
+            </select>
+          )}
+          <input
+            type="number"
+            placeholder="Amount"
+            value={amount}
+            onChange={(e) => setAmount(e.target.value)}
+            className="w-full border rounded-lg px-4 py-2"
+          />
+          <div className="flex gap-2">
+            <button
+              onClick={() => setShowAddModal(false)}
+              className="flex-1 bg-gray-200 text-gray-800 px-4 py-2 rounded-lg font-medium"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleAdd}
+              className="flex-1 bg-violet-600 text-white px-4 py-2 rounded-lg font-medium"
+            >
+              Add
+            </button>
           </div>
-          <form onSubmit={handleSubmit} className="space-y-3">
-            <input autoFocus value={desc} onChange={e => { setDesc(e.target.value); if (!isIncome && e.target.value.length > 2) setCategory(categorize(e.target.value, overridesRef.current)); }}
-              placeholder={isIncome ? "Where's the money from?" : "What did you spend on?"} className="w-full px-4 py-3 text-sm border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-transparent" />
-            <div className="flex gap-2">
-              <div className="relative flex-1">
-                <span className="absolute left-3 top-3 text-gray-400 text-sm">{"\u00A3"}</span>
-                <input type="number" step="0.01" value={amount} onChange={e => setAmount(e.target.value)}
-                  placeholder="0.00" className="w-full pl-7 pr-4 py-3 text-sm border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-transparent" />
-              </div>
-              <input type="date" value={date} onChange={e => setDate(e.target.value)}
-                className="flex-1 px-3 py-3 text-sm border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-transparent" />
-            </div>
-            {!isIncome && (
-              <div className="grid grid-cols-2 gap-2">
-                {Object.entries(CATEGORIES).map(([name, { icon }]) => (
-                  <button type="button" key={name} onClick={() => setCategory(name)}
-                    className={`flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-medium transition-all border ${category === name ? "border-violet-500 bg-violet-50 text-violet-700" : "border-gray-100 bg-gray-50 text-gray-600 hover:bg-gray-100"}`}>
-                    <span>{icon}</span> {name}
-                  </button>
-                ))}
-              </div>
-            )}
-            <div className="flex gap-2 pt-2">
-              <button type="button" onClick={() => setShowAddModal(false)} className="flex-1 py-3 text-sm font-medium text-gray-600 bg-gray-100 rounded-xl hover:bg-gray-200 transition-all">Cancel</button>
-              <button type="submit" disabled={!desc.trim() || !amount}
-                className={`flex-1 py-3 text-sm font-medium text-white rounded-xl transition-all disabled:opacity-40 ${isIncome ? "bg-emerald-500 hover:bg-emerald-600" : "bg-violet-500 hover:bg-violet-600"}`}>
-                {isIncome ? "Add Income" : "Add Expense"}
-              </button>
-            </div>
-          </form>
         </div>
       </div>
     );
-  };
+  }
 
-  // ─── EDIT ROW ───
-  const EditRow = ({ expense }) => {
-    const [cat, setCat] = useState(expense.category);
+  function EditRow({ expense, isIncome = false }) {
+    const [editData, setEditData] = useState(expense);
+
     return (
-      <div className="flex items-center gap-2 py-2 px-3 bg-violet-50 rounded-xl border border-violet-200">
-        <select value={cat} onChange={e => { setCat(e.target.value); updateExpense(expense.id, { category: e.target.value }); }}
-          className="text-xs bg-white border border-gray-200 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-violet-500">
-          {Object.keys(CATEGORIES).map(c => <option key={c} value={c}>{c}</option>)}
-        </select>
-        <span className="flex-1 text-sm text-gray-700 truncate">{expense.description}</span>
-        <span className="text-sm font-medium">{formatCurrency(expense.amount)}</span>
-        <button onClick={() => setEditingId(null)} className="text-xs text-violet-600 font-medium">Done</button>
+      <div className="bg-white rounded-lg border border-gray-100 p-3 space-y-3">
+        <input
+          type="date"
+          value={(() => {
+            try {
+              const d = parseUKDate(editData.date);
+              return d.toISOString().split("T")[0];
+            } catch {
+              return "";
+            }
+          })()}
+          onChange={(e) => {
+            const d = new Date(e.target.value);
+            setEditData({
+              ...editData,
+              date: `${d.getDate()} ${d.toLocaleDateString("en-GB", { month: "short" }).split(" ")[0]} ${d.getFullYear()}`,
+            });
+          }}
+          className="w-full border rounded-lg px-3 py-2 text-sm"
+        />
+        <input
+          type="text"
+          value={editData.description}
+          onChange={(e) => setEditData({ ...editData, description: e.target.value })}
+          className="w-full border rounded-lg px-3 py-2 text-sm"
+        />
+        {!isIncome && (
+          <select
+            value={editData.category}
+            onChange={(e) => setEditData({ ...editData, category: e.target.value })}
+            className="w-full border rounded-lg px-3 py-2 text-sm"
+          >
+            {Object.keys(CATEGORIES).map((cat) => (
+              <option key={cat} value={cat}>{cat}</option>
+            ))}
+          </select>
+        )}
+        <input
+          type="number"
+          value={editData.amount}
+          onChange={(e) => setEditData({ ...editData, amount: parseFloat(e.target.value) })}
+          className="w-full border rounded-lg px-3 py-2 text-sm"
+        />
+        <div className="flex gap-2">
+          <button
+            onClick={() => {
+              setEditingId(null);
+            }}
+            className="flex-1 text-sm px-3 py-2 bg-gray-100 text-gray-700 rounded-lg"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={() => {
+              if (isIncome) {
+                deleteIncome(editData.id);
+              } else {
+                deleteExpense(editData.id);
+              }
+            }}
+            className="flex-1 text-sm px-3 py-2 bg-red-100 text-red-700 rounded-lg"
+          >
+            Delete
+          </button>
+          <button
+            onClick={() => {
+              if (isIncome) {
+                setIncomes((prev) =>
+                  prev.map((i) => (i.id === editData.id ? editData : i))
+                );
+              } else {
+                editExpense(editData.id, editData);
+              }
+            }}
+            className="flex-1 text-sm px-3 py-2 bg-violet-600 text-white rounded-lg"
+          >
+            Save
+          </button>
+        </div>
       </div>
     );
-  };
+  }
 
-  // ─── CATEGORY DRILL-DOWN VIEW ───
-  const CategoryDrillDown = () => (
-    <div className="space-y-3">
-      <div className="flex items-center gap-3">
-        <button onClick={() => setDrillCategory(null)} className="p-1.5 rounded-lg bg-gray-100 hover:bg-gray-200 transition-all">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 12H5"/><polyline points="12 19 5 12 12 5"/></svg>
-        </button>
-        <div className="flex items-center gap-2">
-          <span className="text-xl">{CATEGORIES[drillCategory]?.icon}</span>
-          <div>
-            <h2 className="text-base font-bold text-gray-900">{drillCategory}</h2>
-            <p className="text-xs text-gray-500">{drillExpenses.length} transactions {"\u2022"} {formatCurrency(drillExpenses.reduce((s, e) => s + e.amount, 0))}</p>
-          </div>
+  function CategoryDrillDown() {
+    return (
+      <div className="space-y-4">
+        <div className="flex items-center gap-3 pb-4 border-b">
+          <button
+            onClick={() => setDrillCategory(null)}
+            className="text-violet-600 font-medium"
+          >
+            {"\u2190"} Back
+          </button>
+          <h3 className="text-lg font-bold">{drillCategory}</h3>
         </div>
-      </div>
 
-      {/* Re-categorise hint */}
-      {Object.keys(categoryOverrides).length > 0 && (
-        <div className="bg-violet-50 rounded-xl border border-violet-100 p-3 flex items-center justify-between">
-          <p className="text-xs text-violet-700">{"\u{1F9E0}"} PennyTrack learns from your edits!</p>
-          <button onClick={recategoriseAll} className="text-xs text-violet-600 font-medium bg-white px-2 py-1 rounded-lg border border-violet-200 hover:bg-violet-50">Re-categorise all</button>
-        </div>
-      )}
-
-      <div className="space-y-1.5">
-        {drillExpenses.map(expense => (
-          editingId === expense.id ? <EditRow key={expense.id} expense={expense} /> : (
-            <div key={expense.id} className="group flex items-center gap-3 p-3 rounded-xl bg-white border border-gray-100 hover:border-gray-200 hover:shadow-sm transition-all">
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium text-gray-800 truncate">{expense.description}</p>
-                <p className="text-xs text-gray-400">{expense.date}</p>
+        {drillExpenses.map((e) => (
+          <div key={e.id} className="bg-white rounded-lg border border-gray-100 p-4 hover:shadow-md transition-all">
+            <div className="flex justify-between items-start">
+              <div>
+                <p className="font-medium text-gray-800">{e.description}</p>
+                <p className="text-xs text-gray-400">
+                  {e.date} {"\u2022"} {e.category}
+                  {e.paymentType && (
+                    <span className={`ml-1.5 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                      PAYMENT_TYPES[e.paymentType]?.type === "income" ? "bg-emerald-100 text-emerald-700" :
+                      PAYMENT_TYPES[e.paymentType]?.recurring ? "bg-blue-100 text-blue-700" :
+                      "bg-gray-100 text-gray-600"
+                    }`}>
+                      {PAYMENT_TYPES[e.paymentType]?.icon} {e.paymentType}
+                    </span>
+                  )}
+                </p>
               </div>
-              <span className="text-sm font-semibold text-gray-800">{formatCurrency(expense.amount)}</span>
-              <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                <button onClick={() => setEditingId(expense.id)} className="p-1 text-gray-400 hover:text-violet-500 rounded" title="Change category">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-                </button>
-                <button onClick={() => deleteExpense(expense.id)} className="p-1 text-gray-400 hover:text-red-500 rounded" title="Delete">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-                </button>
+              <div className="text-right">
+                <p className="font-bold text-gray-800">{formatCurrency(e.amount)}</p>
+                {editingId === e.id && (
+                  <EditRow expense={e} />
+                )}
+                {editingId !== e.id && (
+                  <button
+                    onClick={() => setEditingId(e.id)}
+                    className="text-xs text-violet-600 hover:text-violet-800 font-medium mt-1"
+                  >
+                    Edit
+                  </button>
+                )}
               </div>
             </div>
-          )
+          </div>
         ))}
       </div>
-    </div>
-  );
+    );
+  }
 
-  // ─── LOADING SCREEN ───
-  if (authLoading) {
-    return <div className="min-h-screen bg-gray-50 flex items-center justify-center"><div className="text-center"><span className="text-4xl block mb-3">{"\u{1F4B7}"}</span><p className="text-gray-400 text-sm">Loading...</p></div></div>;
+  // ============ RENDER ============
+
+  if (!user) {
+    return (
+      <div className="flex flex-col items-center justify-center h-screen bg-gradient-to-br from-violet-600 to-purple-600 text-white">
+        <h1 className="text-5xl font-bold mb-4">{"\u{1F4B5}"}</h1>
+        <h2 className="text-3xl font-bold mb-2">PennyTrack</h2>
+        <p className="text-violet-100 mb-8 text-center max-w-sm">
+          Smart expense tracking with AI-powered categorization and bank statement import.
+        </p>
+        <button
+          onClick={handleLogin}
+          className="bg-white text-violet-600 px-8 py-3 rounded-lg font-bold hover:bg-gray-50 transition-all"
+        >
+          Sign in with Google
+        </button>
+      </div>
+    );
   }
 
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Header */}
-      <div className="bg-white border-b border-gray-200 sticky top-0 z-40">
-        <div className="max-w-2xl mx-auto px-4">
-          <div className="flex items-center justify-between h-14">
-            <div className="flex items-center gap-2.5">
-              <div className="w-8 h-8 bg-violet-500 rounded-xl flex items-center justify-center"><span className="text-white text-lg">{"\u{1F4B7}"}</span></div>
-              <div><h1 className="text-base font-bold text-gray-900 leading-tight">PennyTrack</h1><p className="text-[10px] text-gray-400 leading-tight">Smart Expense Tracker</p></div>
-            </div>
-            <div className="flex items-center gap-2">
-              {user ? (
-                <button onClick={handleSignOut} className="flex items-center gap-1.5 px-2 py-1 rounded-lg hover:bg-gray-100 transition-all" title={`Signed in as ${user.email}\nClick to sign out`}>
-                  <img src={user.photoURL} alt="" className="w-6 h-6 rounded-full" referrerPolicy="no-referrer" />
-                  {syncStatus === "synced" && <span className="w-2 h-2 bg-emerald-400 rounded-full"></span>}
-                  {syncStatus === "saving..." && <span className="w-2 h-2 bg-yellow-400 rounded-full animate-pulse"></span>}
-                  {syncStatus === "error" && <span className="w-2 h-2 bg-red-400 rounded-full"></span>}
-                </button>
-              ) : (
-                <button onClick={handleSignIn} className="text-xs text-white bg-violet-500 hover:bg-violet-600 px-3 py-1.5 rounded-lg transition-all font-medium">Sign in</button>
-              )}
-            </div>
+      <div className="bg-white border-b border-gray-100 sticky top-0 z-40">
+        <div className="max-w-6xl mx-auto px-4 py-4 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <h1 className="text-2xl font-bold">{"\u{1F4B5}"} PennyTrack</h1>
+            {syncStatus === "syncing" && <span className="text-xs text-gray-500">{"\u231B"}</span>}
           </div>
-          {!user && <div className="pb-2"><p className="text-xs text-amber-600 bg-amber-50 px-3 py-1.5 rounded-lg">Sign in with Google to sync across all devices</p></div>}
-
-          {/* Tabs */}
-          <div className="flex gap-1 -mb-px">
-            {[
-              { id: "dashboard", label: "Dashboard", icon: "\u{1F4CA}" },
-              { id: "expenses", label: "Expenses", icon: "\u{1F4DD}" },
-              { id: "income", label: "Income", icon: "\u{1F4B0}" },
-              { id: "import", label: "Import", icon: "\u{1F4E5}" },
-            ].map(tab => (
-              <button key={tab.id} onClick={() => { setActiveTab(tab.id); setDrillCategory(null); }}
-                className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-all ${activeTab === tab.id ? "border-violet-500 text-violet-600" : "border-transparent text-gray-500 hover:text-gray-700"}`}>
-                {tab.icon} {tab.label}
-              </button>
-            ))}
-          </div>
+          <button
+            onClick={handleLogout}
+            className="text-sm text-gray-600 hover:text-gray-800 px-3 py-2 rounded-lg hover:bg-gray-100"
+          >
+            Sign out
+          </button>
         </div>
       </div>
 
-      <div className="max-w-2xl mx-auto px-4 py-4 pb-32">
-        {/* ─── DASHBOARD TAB ─── */}
+      {/* Tabs */}
+      <div className="bg-white border-b border-gray-100 sticky top-16 z-40">
+        <div className="max-w-6xl mx-auto px-4 flex gap-8 overflow-x-auto">
+          {tabs.map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={`py-4 px-2 border-b-2 font-medium text-sm transition-all ${
+                activeTab === tab.id
+                  ? "border-violet-600 text-violet-600"
+                  : "border-transparent text-gray-600 hover:text-gray-800"
+              }`}
+            >
+              {tab.icon} {tab.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Content */}
+      <div className="max-w-6xl mx-auto px-4 py-8">
+        {/* Dashboard */}
         {activeTab === "dashboard" && (
-          drillCategory ? <CategoryDrillDown /> : (
-          <div className="space-y-4">
-            {/* Month filter */}
-            <div className="flex gap-2 overflow-x-auto pb-1">
-              <button onClick={() => setSelectedMonth("all")} className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-all ${selectedMonth === "all" ? "bg-violet-500 text-white" : "bg-white text-gray-600 border border-gray-200 hover:bg-gray-50"}`}>All Time</button>
-              {availableMonths.map(m => (
-                <button key={m} onClick={() => setSelectedMonth(m)} className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-all ${selectedMonth === m ? "bg-violet-500 text-white" : "bg-white text-gray-600 border border-gray-200 hover:bg-gray-50"}`}>{formatMonth(m)}</button>
-              ))}
+          <div className="space-y-6">
+            {/* Totals */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="bg-white rounded-2xl p-6 border border-gray-100">
+                <p className="text-gray-600 text-sm font-medium">Spent</p>
+                <p className="text-3xl font-bold text-gray-800 mt-2">{formatCurrency(totalSpent)}</p>
+                <p className="text-xs text-gray-400 mt-1">{formatMonth(selectedMonth)}</p>
+              </div>
+              <div className="bg-white rounded-2xl p-6 border border-gray-100">
+                <p className="text-gray-600 text-sm font-medium">Income</p>
+                <p className="text-3xl font-bold text-emerald-600 mt-2">{formatCurrency(totalIncome)}</p>
+                <p className="text-xs text-gray-400 mt-1">{formatMonth(selectedMonth)}</p>
+              </div>
+              <div className={`bg-white rounded-2xl p-6 border border-gray-100 ${netAmount >= 0 ? "bg-emerald-50" : "bg-red-50"}`}>
+                <p className="text-gray-600 text-sm font-medium">Net</p>
+                <p className={`text-3xl font-bold mt-2 ${netAmount >= 0 ? "text-emerald-600" : "text-red-600"}`}>
+                  {formatCurrency(Math.abs(netAmount))}
+                </p>
+                <p className="text-xs text-gray-400 mt-1">{netAmount >= 0 ? "Surplus" : "Deficit"}</p>
+              </div>
             </div>
 
-            {expenses.length === 0 && incomes.length === 0 ? (
-              <div className="text-center py-16">
-                <span className="text-5xl mb-4 block">{"\u{1F4B7}"}</span>
-                <p className="text-gray-500 font-medium">No transactions yet</p>
-                <p className="text-gray-400 text-sm mt-1">Add expenses/income manually or import a bank statement</p>
-              </div>
-            ) : (
-              <>
-                {/* Summary cards */}
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="bg-gradient-to-r from-violet-500 to-purple-600 rounded-2xl p-4 text-white">
-                    <p className="text-violet-200 text-xs font-medium">Total Spent</p>
-                    <p className="text-2xl font-bold mt-1">{formatCurrency(totalSpent)}</p>
-                    <p className="text-violet-200 text-[10px] mt-1">{filteredExpenses.length} transactions</p>
-                  </div>
-                  <div className="bg-gradient-to-r from-emerald-500 to-teal-600 rounded-2xl p-4 text-white">
-                    <p className="text-emerald-200 text-xs font-medium">Total Income</p>
-                    <p className="text-2xl font-bold mt-1">{formatCurrency(totalIncome)}</p>
-                    <p className="text-emerald-200 text-[10px] mt-1">{filteredIncomes.length} entries</p>
-                  </div>
-                </div>
-
-                {/* Net & Savings row */}
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="bg-white rounded-2xl border border-gray-100 p-4">
-                    <p className="text-gray-500 text-xs font-medium">Net (Income - Spend)</p>
-                    <p className={`text-xl font-bold mt-1 ${netAmount >= 0 ? "text-emerald-600" : "text-red-500"}`}>
-                      {netAmount >= 0 ? "+" : ""}{formatCurrency(netAmount)}
-                    </p>
-                  </div>
-                  <div className="bg-white rounded-2xl border border-gray-100 p-4">
-                    <div className="flex items-center justify-between">
-                      <p className="text-gray-500 text-xs font-medium">{"\u{1F3E6}"} Savings</p>
-                      <button onClick={() => {
-                        const val = prompt("Enter current savings balance (\u00A3):", savingsBalance);
-                        if (val !== null && !isNaN(parseFloat(val))) setSavingsBalance(parseFloat(parseFloat(val).toFixed(2)));
-                      }} className="text-[10px] text-violet-500 hover:text-violet-700">Edit</button>
-                    </div>
-                    <p className="text-xl font-bold mt-1 text-blue-600">{formatCurrency(savingsBalance)}</p>
-                  </div>
-                </div>
-
-                {/* Category breakdown pie - CLICKABLE */}
-                {categoryBreakdown.length > 0 && (
-                  <div className="bg-white rounded-2xl border border-gray-100 p-4">
-                    <h3 className="text-sm font-semibold text-gray-800 mb-3">Spending by Category</h3>
-                    <div className="flex items-center gap-4">
-                      <ResponsiveContainer width="50%" height={180}>
-                        <PieChart>
-                          <Pie data={categoryBreakdown} dataKey="value" cx="50%" cy="50%" innerRadius={40} outerRadius={70} paddingAngle={2}
-                            onClick={(_, idx) => setDrillCategory(categoryBreakdown[idx]?.name)}>
-                            {categoryBreakdown.map((entry, i) => <Cell key={i} fill={entry.color} className="cursor-pointer" />)}
-                          </Pie>
-                          <Tooltip formatter={(v) => formatCurrency(v)} />
-                        </PieChart>
-                      </ResponsiveContainer>
-                      <div className="flex-1 space-y-1.5">
-                        {categoryBreakdown.slice(0, 6).map(cat => (
-                          <button key={cat.name} onClick={() => setDrillCategory(cat.name)}
-                            className="flex items-center justify-between text-xs w-full hover:bg-gray-50 rounded-lg px-1.5 py-1 transition-all">
-                            <div className="flex items-center gap-1.5">
-                              <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: cat.color }}></span>
-                              <span className="text-gray-600">{CATEGORIES[cat.name]?.icon} {cat.name}</span>
-                            </div>
-                            <span className="font-medium text-gray-800">{formatCurrency(cat.value)}</span>
-                          </button>
+            {/* Charts */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {/* Pie Chart */}
+              {categoryBreakdown.length > 0 && (
+                <div className="bg-white rounded-2xl p-6 border border-gray-100">
+                  <h3 className="text-lg font-bold mb-4">Spending by Category</h3>
+                  <ResponsiveContainer width="100%" height={300}>
+                    <PieChart>
+                      <Pie
+                        data={categoryBreakdown}
+                        cx="50%"
+                        cy="50%"
+                        labelLine={false}
+                        outerRadius={100}
+                        fill="#8884d8"
+                        dataKey="value"
+                      >
+                        {categoryBreakdown.map((entry, index) => (
+                          <Cell key={`cell-${index}`} fill={entry.color} />
                         ))}
-                        {categoryBreakdown.length > 6 && (
-                          <p className="text-[10px] text-gray-400 text-center">+ {categoryBreakdown.length - 6} more categories</p>
-                        )}
-                      </div>
-                    </div>
-                    <p className="text-[10px] text-gray-400 text-center mt-2">Tap a category to see all transactions</p>
-                  </div>
-                )}
-
-                {/* Monthly trend - now shows income vs spending */}
-                {monthlyTrend.length > 1 && (
-                  <div className="bg-white rounded-2xl border border-gray-100 p-4">
-                    <h3 className="text-sm font-semibold text-gray-800 mb-3">Monthly Trend</h3>
-                    <ResponsiveContainer width="100%" height={180}>
-                      <BarChart data={monthlyTrend}>
-                        <XAxis dataKey="month" tick={{ fontSize: 11 }} />
-                        <YAxis tick={{ fontSize: 11 }} tickFormatter={v => `\u00A3${v}`} />
-                        <Tooltip formatter={(v) => formatCurrency(v)} />
-                        <Bar dataKey="income" fill="#10b981" radius={[6, 6, 0, 0]} name="Income" />
-                        <Bar dataKey="spent" fill="#8b5cf6" radius={[6, 6, 0, 0]} name="Spent" />
-                        <Legend wrapperStyle={{ fontSize: 11 }} />
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </div>
-                )}
-
-                {/* Top merchants */}
-                {topMerchants.length > 0 && (
-                  <div className="bg-white rounded-2xl border border-gray-100 p-4">
-                    <h3 className="text-sm font-semibold text-gray-800 mb-3">Top Spending</h3>
-                    <div className="space-y-2">
-                      {topMerchants.map((m, i) => (
-                        <div key={m.name} className="flex items-center gap-3">
-                          <span className="w-6 h-6 bg-violet-100 text-violet-600 rounded-lg flex items-center justify-center text-xs font-bold">{i + 1}</span>
-                          <span className="flex-1 text-sm text-gray-700 truncate">{m.name}</span>
-                          <span className="text-sm font-medium text-gray-800">{formatCurrency(m.total)}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* Self-learning indicator */}
-                {Object.keys(categoryOverrides).length > 0 && (
-                  <div className="bg-violet-50 rounded-2xl border border-violet-100 p-3 flex items-center justify-between">
-                    <div>
-                      <p className="text-xs text-violet-800 font-medium">{"\u{1F9E0}"} Smart Categories Active</p>
-                      <p className="text-[10px] text-violet-600">{Object.keys(categoryOverrides).length} custom rules learned from your edits</p>
-                    </div>
-                    <button onClick={recategoriseAll} className="text-xs text-violet-600 font-medium bg-white px-3 py-1.5 rounded-lg border border-violet-200 hover:bg-violet-50">Apply to all</button>
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-          )
-        )}
-
-        {/* ─── EXPENSES TAB ─── */}
-        {activeTab === "expenses" && (
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <p className="text-sm text-gray-500">{expenses.length} total expenses</p>
-              <div className="flex gap-2 overflow-x-auto">
-                <button onClick={() => setSelectedMonth("all")} className={`px-2 py-1 rounded-md text-xs transition-all ${selectedMonth === "all" ? "bg-violet-100 text-violet-700 font-medium" : "text-gray-400 hover:bg-gray-100"}`}>All</button>
-                {availableMonths.slice(0, 3).map(m => (
-                  <button key={m} onClick={() => setSelectedMonth(m)} className={`px-2 py-1 rounded-md text-xs transition-all ${selectedMonth === m ? "bg-violet-100 text-violet-700 font-medium" : "text-gray-400 hover:bg-gray-100"}`}>{formatMonth(m)}</button>
-                ))}
-              </div>
-            </div>
-
-            {filteredExpenses.length === 0 ? (
-              <div className="text-center py-16"><span className="text-5xl mb-4 block">{"\u{1F4DD}"}</span><p className="text-gray-500 font-medium">No expenses to show</p></div>
-            ) : (
-              <div className="space-y-1.5">
-                {filteredExpenses.sort((a, b) => new Date(b.date) - new Date(a.date)).map(expense => (
-                  editingId === expense.id ? <EditRow key={expense.id} expense={expense} /> : (
-                    <div key={expense.id} className="group flex items-center gap-3 p-3 rounded-xl bg-white border border-gray-100 hover:border-gray-200 hover:shadow-sm transition-all">
-                      <div className="w-9 h-9 rounded-xl flex items-center justify-center text-lg" style={{ backgroundColor: `${CATEGORIES[expense.category]?.color || "#9ca3af"}15` }}>
-                        {CATEGORIES[expense.category]?.icon || "\u{1F4E6}"}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium text-gray-800 truncate">{expense.description}</p>
-                        <p className="text-xs text-gray-400">{expense.date} {"\u2022"} {expense.category}</p>
-                      </div>
-                      <span className="text-sm font-semibold text-gray-800">{formatCurrency(expense.amount)}</span>
-                      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                        <button onClick={() => setEditingId(expense.id)} className="p-1 text-gray-400 hover:text-violet-500 rounded" title="Edit category">
-                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-                        </button>
-                        <button onClick={() => deleteExpense(expense.id)} className="p-1 text-gray-400 hover:text-red-500 rounded" title="Delete">
-                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-                        </button>
-                      </div>
-                    </div>
-                  )
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* ─── INCOME TAB ─── */}
-        {activeTab === "income" && (
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <p className="text-sm text-gray-500">{incomes.length} income entries</p>
-              <button onClick={() => { setAddModalType("income"); setShowAddModal(true); }}
-                className="text-xs text-white bg-emerald-500 hover:bg-emerald-600 px-3 py-1.5 rounded-lg transition-all font-medium">+ Add Income</button>
-            </div>
-
-            {/* Income total card */}
-            {filteredIncomes.length > 0 && (
-              <div className="bg-gradient-to-r from-emerald-500 to-teal-600 rounded-2xl p-5 text-white">
-                <p className="text-emerald-200 text-sm font-medium">{selectedMonth === "all" ? "Total Income" : `Income in ${formatMonth(selectedMonth)}`}</p>
-                <p className="text-3xl font-bold mt-1">{formatCurrency(totalIncome)}</p>
-              </div>
-            )}
-
-            {filteredIncomes.length === 0 ? (
-              <div className="text-center py-16"><span className="text-5xl mb-4 block">{"\u{1F4B0}"}</span><p className="text-gray-500 font-medium">No income recorded</p><p className="text-gray-400 text-sm mt-1">Tap "+ Add Income" to get started</p></div>
-            ) : (
-              <div className="space-y-1.5">
-                {filteredIncomes.sort((a, b) => new Date(b.date) - new Date(a.date)).map(income => (
-                  <div key={income.id} className="group flex items-center gap-3 p-3 rounded-xl bg-white border border-gray-100 hover:border-gray-200 hover:shadow-sm transition-all">
-                    <div className="w-9 h-9 rounded-xl flex items-center justify-center text-lg bg-emerald-50">{"\u{1F4B0}"}</div>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-gray-800 truncate">{income.description}</p>
-                      <p className="text-xs text-gray-400">{income.date}</p>
-                    </div>
-                    <span className="text-sm font-semibold text-emerald-600">+{formatCurrency(income.amount)}</span>
-                    <button onClick={() => deleteIncome(income.id)} className="p-1 text-gray-400 hover:text-red-500 rounded opacity-0 group-hover:opacity-100 transition-opacity" title="Delete">
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* ─── IMPORT TAB ─── */}
-        {activeTab === "import" && (
-          <div className="space-y-4">
-            <div className="bg-white rounded-2xl border border-gray-100 p-6 text-center">
-              <span className="text-4xl block mb-3">{"\u{1F4C4}"}</span>
-              <h3 className="text-base font-semibold text-gray-800 mb-1">Import Bank Statement</h3>
-              <p className="text-sm text-gray-500 mb-4">Upload a CSV or PDF from your bank</p>
-              <label className="inline-flex items-center gap-2 px-5 py-3 bg-violet-500 text-white text-sm font-medium rounded-xl hover:bg-violet-600 transition-all cursor-pointer">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-                Choose File
-                <input type="file" accept=".csv,.tsv,.pdf,image/*" onChange={handleFileImport} className="hidden" />
-              </label>
-              <p className="text-xs text-gray-400 mt-3">Supports CSV, PDF, and receipt images</p>
-            </div>
-
-            <div className="bg-white rounded-2xl border border-gray-100 p-6 text-center">
-              <span className="text-4xl block mb-3">{"\u{1F4F8}"}</span>
-              <h3 className="text-base font-semibold text-gray-800 mb-1">Scan Receipt</h3>
-              <p className="text-sm text-gray-500 mb-4">Take a photo and we'll read it automatically</p>
-              {ocrProgress !== null ? (
-                <div className="space-y-2">
-                  <div className="w-full bg-gray-200 rounded-full h-2.5"><div className="bg-violet-500 h-2.5 rounded-full transition-all duration-300" style={{ width: `${ocrProgress}%` }}></div></div>
-                  <p className="text-xs text-violet-600 font-medium">Reading receipt... {ocrProgress}%</p>
+                      </Pie>
+                      <Tooltip formatter={(value) => formatCurrency(value)} />
+                    </PieChart>
+                  </ResponsiveContainer>
                 </div>
-              ) : (
-                <label className="inline-flex items-center gap-2 px-5 py-3 bg-violet-500 text-white text-sm font-medium rounded-xl hover:bg-violet-600 transition-all cursor-pointer">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
-                  Take Photo / Upload
-                  <input type="file" accept="image/*" capture="environment" onChange={handleFileImport} className="hidden" />
-                </label>
               )}
-              <p className="text-xs text-gray-400 mt-3">Auto-reads merchant, total & date from receipts</p>
+
+              {/* Bar Chart */}
+              {monthlyTrend.length > 0 && (
+                <div className="bg-white rounded-2xl p-6 border border-gray-100">
+                  <h3 className="text-lg font-bold mb-4">Monthly Trend</h3>
+                  <ResponsiveContainer width="100%" height={300}>
+                    <BarChart data={monthlyTrend}>
+                      <XAxis dataKey="month" />
+                      <YAxis />
+                      <Tooltip formatter={(value) => formatCurrency(value)} />
+                      <Bar dataKey="spending" fill="#8b5cf6" />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
             </div>
 
-            {importResult && (
-              <div className={`rounded-xl p-4 text-sm ${importResult.status === "success" ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : importResult.status === "warning" ? "bg-amber-50 text-amber-700 border border-amber-200" : importResult.status === "error" ? "bg-red-50 text-red-700 border border-red-200" : "bg-violet-50 text-violet-700 border border-violet-200"}`}>
-                <div className="flex items-center justify-between">
-                  <span>{importResult.message}</span>
-                  <button onClick={() => setImportResult(null)} className="text-gray-400 hover:text-gray-600 ml-2">{"\u2715"}</button>
-                </div>
-              </div>
-            )}
-
-            {receipts.length > 0 && (
-              <div className="bg-white rounded-2xl border border-gray-100 p-4">
-                <h3 className="text-sm font-semibold text-gray-800 mb-3">{"\u{1F4F8}"} Saved Receipts ({receipts.length})</h3>
-                <div className="grid grid-cols-3 gap-2">
-                  {receipts.map(r => (
-                    <div key={r.id} className="aspect-square rounded-xl border border-gray-200 overflow-hidden bg-gray-50 flex items-center justify-center">
-                      {r.imageData ? <img src={r.imageData} alt="Receipt" className="w-full h-full object-cover" /> : <span className="text-2xl">{"\u{1F9FE}"}</span>}
+            {/* Categories */}
+            {categoryBreakdown.length > 0 && (
+              <div className="bg-white rounded-2xl p-6 border border-gray-100">
+                <h3 className="text-lg font-bold mb-4">Categories</h3>
+                <div className="space-y-3">
+                  {categoryBreakdown.map((cat) => (
+                    <div
+                      key={cat.name}
+                      onClick={() => setDrillCategory(cat.name)}
+                      className="flex items-center gap-3 p-3 hover:bg-gray-50 rounded-lg cursor-pointer transition-all"
+                    >
+                      <div className="w-10 h-10 rounded-lg flex items-center justify-center text-lg" style={{ backgroundColor: cat.color + "20" }}>
+                        {cat.icon}
+                      </div>
+                      <div className="flex-1">
+                        <p className="font-medium text-gray-800">{cat.name}</p>
+                        <div className="w-full bg-gray-200 rounded-full h-2 mt-1">
+                          <div
+                            className="h-2 rounded-full"
+                            style={{ width: `${(cat.value / totalSpent) * 100}%`, backgroundColor: cat.color }}
+                          />
+                        </div>
+                      </div>
+                      <p className="font-bold text-gray-800">{formatCurrency(cat.value)}</p>
                     </div>
                   ))}
                 </div>
               </div>
             )}
 
-            <div className="bg-violet-50 rounded-2xl border border-violet-100 p-4">
-              <h3 className="text-sm font-semibold text-violet-800 mb-2">How to download your bank statement</h3>
-              <div className="text-xs text-violet-700 space-y-1">
-                <p>{"\u2022"} Most UK banks let you download CSV from online banking</p>
-                <p>{"\u2022"} Look for "Download transactions" or "Export" in your account</p>
-                <p>{"\u2022"} Select CSV format and your date range</p>
-                <p>{"\u2022"} Upload the file here and we'll categorise everything!</p>
+            {/* Top Merchants */}
+            {topMerchants.length > 0 && (
+              <div className="bg-white rounded-2xl p-6 border border-gray-100">
+                <h3 className="text-lg font-bold mb-4">Top Merchants</h3>
+                <div className="space-y-2">
+                  {topMerchants.map((m) => (
+                    <div key={m.name} className="flex justify-between items-center p-3 hover:bg-gray-50 rounded-lg">
+                      <p className="text-gray-700 font-medium">{m.name}</p>
+                      <p className="text-gray-800 font-bold">{formatCurrency(m.amount)}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Month Picker */}
+            <div className="bg-white rounded-2xl p-6 border border-gray-100">
+              <label className="text-sm font-medium text-gray-700">Select Month</label>
+              <select
+                value={selectedMonth}
+                onChange={(e) => setSelectedMonth(e.target.value)}
+                className="mt-2 w-full border rounded-lg px-4 py-2"
+              >
+                {availableMonths.map((month) => (
+                  <option key={month} value={month}>
+                    {formatMonth(month)}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+        )}
+
+        {/* Expenses */}
+        {activeTab === "expenses" && (
+          <div className="space-y-4">
+            {editingId && (
+              <EditRow expense={filteredExpenses.find((e) => e.id === editingId)} />
+            )}
+            {filteredExpenses.length === 0 ? (
+              <div className="text-center py-16">
+                <p className="text-gray-500 font-medium">{"\u{1F4B5}"} No expenses this month</p>
+              </div>
+            ) : (
+              filteredExpenses
+                .sort((a, b) => {
+                  try {
+                    return parseUKDate(b.date) - parseUKDate(a.date);
+                  } catch {
+                    return 0;
+                  }
+                })
+                .map((e) => (
+                  <div key={e.id} className="bg-white rounded-lg border border-gray-100 p-4 hover:shadow-md transition-all">
+                    <div className="flex justify-between items-start">
+                      <div>
+                        <p className="font-medium text-gray-800">{e.description}</p>
+                        <p className="text-xs text-gray-400">
+                          {e.date} {"\u2022"} {e.category}
+                          {e.paymentType && (
+                            <span className={`ml-1.5 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                              PAYMENT_TYPES[e.paymentType]?.type === "income" ? "bg-emerald-100 text-emerald-700" :
+                              PAYMENT_TYPES[e.paymentType]?.recurring ? "bg-blue-100 text-blue-700" :
+                              "bg-gray-100 text-gray-600"
+                            }`}>
+                              {PAYMENT_TYPES[e.paymentType]?.icon} {e.paymentType}
+                            </span>
+                          )}
+                        </p>
+                      </div>
+                      <div className="text-right">
+                        <p className="font-bold text-gray-800">{formatCurrency(e.amount)}</p>
+                        {editingId !== e.id && (
+                          <button
+                            onClick={() => setEditingId(e.id)}
+                            className="text-xs text-violet-600 hover:text-violet-800 font-medium mt-1"
+                          >
+                            Edit
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    {editingId === e.id && (
+                      <div className="mt-4">
+                        <EditRow expense={e} />
+                      </div>
+                    )}
+                  </div>
+                ))
+            )}
+          </div>
+        )}
+
+        {/* Income */}
+        {activeTab === "income" && (
+          <div className="space-y-4">
+            {filteredIncomes.length === 0 ? (
+              <div className="text-center py-16">
+                <p className="text-gray-500 font-medium">{"\u{1F4B0}"} No income this month</p>
+              </div>
+            ) : (
+              filteredIncomes
+                .sort((a, b) => {
+                  try {
+                    return parseUKDate(b.date) - parseUKDate(a.date);
+                  } catch {
+                    return 0;
+                  }
+                })
+                .map((i) => (
+                  <div key={i.id} className="bg-white rounded-lg border border-gray-100 p-4 hover:shadow-md transition-all">
+                    <div className="flex justify-between items-start">
+                      <div>
+                        <p className="font-medium text-gray-800">{i.description}</p>
+                        <p className="text-xs text-gray-400">{i.date}</p>
+                      </div>
+                      <div className="text-right">
+                        <p className="font-bold text-emerald-600">{formatCurrency(i.amount)}</p>
+                        {editingId !== i.id && (
+                          <button
+                            onClick={() => setEditingId(i.id)}
+                            className="text-xs text-violet-600 hover:text-violet-800 font-medium mt-1"
+                          >
+                            Edit
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    {editingId === i.id && (
+                      <div className="mt-4">
+                        <EditRow expense={i} isIncome={true} />
+                      </div>
+                    )}
+                  </div>
+                ))
+            )}
+          </div>
+        )}
+
+        {/* Recurring */}
+        {activeTab === "recurring" && (
+          <div className="space-y-4">
+            {/* Summary */}
+            {recurringTransactions.length > 0 && (
+              <div className="grid grid-cols-2 gap-3">
+                <div className="bg-gradient-to-r from-blue-500 to-indigo-600 rounded-2xl p-4 text-white">
+                  <p className="text-blue-200 text-xs font-medium">Direct Debits</p>
+                  <p className="text-2xl font-bold mt-1">{recurringTransactions.filter(r => r.paymentType === "DD").length}</p>
+                  <p className="text-blue-200 text-[10px] mt-1">{formatCurrency(recurringTransactions.filter(r => r.paymentType === "DD").reduce((s, r) => s + r.avgAmount, 0))}/month avg</p>
+                </div>
+                <div className="bg-gradient-to-r from-violet-500 to-purple-600 rounded-2xl p-4 text-white">
+                  <p className="text-violet-200 text-xs font-medium">Standing Orders</p>
+                  <p className="text-2xl font-bold mt-1">{recurringTransactions.filter(r => r.paymentType === "SO").length}</p>
+                  <p className="text-violet-200 text-[10px] mt-1">{formatCurrency(recurringTransactions.filter(r => r.paymentType === "SO").reduce((s, r) => s + r.avgAmount, 0))}/month avg</p>
+                </div>
+              </div>
+            )}
+
+            {recurringTransactions.length === 0 ? (
+              <div className="text-center py-16">
+                <span className="text-5xl mb-4 block">{"\u{1F501}"}</span>
+                <p className="text-gray-500 font-medium">No recurring payments found</p>
+                <p className="text-gray-400 text-sm mt-1">Import a bank statement and we'll detect Direct Debits & Standing Orders</p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <h3 className="text-sm font-semibold text-gray-800">All Recurring Payments</h3>
+                {recurringTransactions.map(r => (
+                  <div key={r.key} className="bg-white rounded-xl border border-gray-100 p-4 hover:shadow-sm transition-all">
+                    <div className="flex items-center gap-3">
+                      <div className={`w-10 h-10 rounded-xl flex items-center justify-center text-lg ${r.paymentType === "DD" ? "bg-blue-50" : "bg-violet-50"}`}>
+                        {PAYMENT_TYPES[r.paymentType]?.icon || "\u{1F501}"}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-gray-800 truncate">{r.description}</p>
+                        <div className="flex items-center gap-2 mt-0.5">
+                          <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium ${r.paymentType === "DD" ? "bg-blue-100 text-blue-700" : "bg-violet-100 text-violet-700"}`}>
+                            {r.paymentType === "DD" ? "Direct Debit" : "Standing Order"}
+                          </span>
+                          <span className="text-xs text-gray-400">{r.category}</span>
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-sm font-semibold text-gray-800">{formatCurrency(r.lastAmount)}</p>
+                        <p className="text-[10px] text-gray-400">avg {formatCurrency(r.avgAmount)}</p>
+                      </div>
+                    </div>
+                    {/* Date info - editable */}
+                    <div className="mt-3 pt-3 border-t border-gray-50 flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-gray-500">{"\u{1F4C5}"} Last:</span>
+                        {editingRecurringDate === r.key ? (
+                          <input
+                            type="date"
+                            defaultValue={(() => { try { const d = parseUKDate(r.lastDate); return d.toISOString().split("T")[0]; } catch { return ""; } })()}
+                            onBlur={(e) => {
+                              if (e.target.value) {
+                                // Update all matching expenses with the new date
+                                const normKey = r.key;
+                                setExpenses(prev => prev.map(exp => {
+                                  if ((exp.paymentType === "DD" || exp.paymentType === "SO") && normaliseDesc(exp.description) === normKey && exp.date === r.lastDate) {
+                                    return { ...exp, date: e.target.value };
+                                  }
+                                  return exp;
+                                }));
+                              }
+                              setEditingRecurringDate(null);
+                            }}
+                            onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); if (e.key === "Escape") setEditingRecurringDate(null); }}
+                            autoFocus
+                            className="text-xs border border-gray-200 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-violet-500"
+                          />
+                        ) : (
+                          <span className="text-xs font-medium text-gray-700">{r.lastDate}</span>
+                        )}
+                        {r.dayOfMonth && !editingRecurringDate && (
+                          <span className="text-[10px] text-gray-400">(~{r.dayOfMonth}{r.dayOfMonth === 1 ? "st" : r.dayOfMonth === 2 ? "nd" : r.dayOfMonth === 3 ? "rd" : "th"} of month)</span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] text-gray-400">{r.count}x seen</span>
+                        <button
+                          onClick={() => setEditingRecurringDate(r.key)}
+                          className="text-xs text-violet-500 hover:text-violet-700 font-medium"
+                        >
+                          Edit date
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Info box */}
+            <div className="bg-blue-50 rounded-2xl border border-blue-100 p-4">
+              <h3 className="text-sm font-semibold text-blue-800 mb-2">{"\u{1F4A1}"} About Payment Types</h3>
+              <div className="text-xs text-blue-700 space-y-1">
+                <p>{"\u2022"} <strong>DD</strong> - Direct Debit: Automatic payments to companies (bills, subscriptions)</p>
+                <p>{"\u2022"} <strong>SO</strong> - Standing Order: Fixed regular payments you've set up</p>
+                <p>{"\u2022"} <strong>FPI/FPO</strong> - Faster Payments: Instant bank transfers in/out</p>
+                <p>{"\u2022"} <strong>DEB</strong> - Debit Card: Card payments in shops or online</p>
+                <p>{"\u2022"} <strong>BGC</strong> - Bank Giro Credit: Credits into your account (salary, refunds)</p>
+                <p>{"\u2022"} Payment types are auto-detected from your bank statement</p>
               </div>
             </div>
+          </div>
+        )}
+
+        {/* Import */}
+        {activeTab === "import" && (
+          <div className="space-y-6">
+            {importResult && (
+              <div className={`rounded-2xl border p-4 ${importResult.success ? "bg-emerald-50 border-emerald-100" : "bg-red-50 border-red-100"}`}>
+                <p className={importResult.success ? "text-emerald-800 font-medium" : "text-red-800 font-medium"}>
+                  {importResult.message}
+                </p>
+                {importResult.count !== undefined && (
+                  <p className={`text-sm mt-1 ${importResult.success ? "text-emerald-700" : "text-red-700"}`}>
+                    {importResult.count} items imported
+                  </p>
+                )}
+              </div>
+            )}
+
+            {/* CSV Import */}
+            <div className="bg-white rounded-2xl border border-gray-100 p-6">
+              <h3 className="text-lg font-bold mb-4">{"\u{1F4C1}"} Import CSV</h3>
+              <input
+                type="file"
+                accept=".csv"
+                onChange={async (e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  const text = await file.text();
+                  const newExpenses = parseCSV(text, categoryOverrides);
+                  importExpenses(newExpenses);
+                  setImportResult({
+                    success: true,
+                    message: "CSV imported successfully",
+                    count: newExpenses.length,
+                  });
+                  setTimeout(() => setImportResult(null), 3000);
+                }}
+                className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-violet-50 file:text-violet-700 hover:file:bg-violet-100"
+              />
+            </div>
+
+            {/* PDF Import */}
+            <div className="bg-white rounded-2xl border border-gray-100 p-6">
+              <h3 className="text-lg font-bold mb-4">{"\u{1F4C4}"} Import PDF</h3>
+              <input
+                type="file"
+                accept=".pdf"
+                onChange={async (e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  const text = await file.text();
+                  const newExpenses = parsePDFText(text, categoryOverrides);
+                  importExpenses(newExpenses);
+                  setImportResult({
+                    success: true,
+                    message: "PDF imported successfully",
+                    count: newExpenses.length,
+                  });
+                  setTimeout(() => setImportResult(null), 3000);
+                }}
+                className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-violet-50 file:text-violet-700 hover:file:bg-violet-100"
+              />
+            </div>
+
+            {/* Receipt Upload */}
+            <div className="bg-white rounded-2xl border border-gray-100 p-6">
+              <h3 className="text-lg font-bold mb-4">{"\u{1F4F7}"} Receipt Photos</h3>
+              <input
+                type="file"
+                accept="image/*"
+                onChange={async (e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  setOcrProgress(50);
+                  const receipts = await parseReceiptImage(file, setOcrProgress, categoryOverrides);
+                  importExpenses(receipts);
+                  setOcrProgress(100);
+                  setImportResult({
+                    success: true,
+                    message: "Receipt scanned successfully",
+                    count: receipts.length,
+                  });
+                  setTimeout(() => setImportResult(null), 3000);
+                  setOcrProgress(0);
+                }}
+                className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-violet-50 file:text-violet-700 hover:file:bg-violet-100"
+              />
+              {ocrProgress > 0 && ocrProgress < 100 && (
+                <div className="mt-4 w-full bg-gray-200 rounded-full h-2">
+                  <div
+                    className="h-2 bg-violet-600 rounded-full transition-all"
+                    style={{ width: `${ocrProgress}%` }}
+                  />
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Drill Category */}
+        {drillCategory && (
+          <div className="mt-8">
+            <CategoryDrillDown />
           </div>
         )}
       </div>
 
       {/* FAB */}
-      <div className="fixed bottom-6 right-6 z-50">
-        <button onClick={() => { setAddModalType("expense"); setShowAddModal(true); }}
-          className="w-14 h-14 bg-violet-500 text-white rounded-2xl shadow-lg hover:bg-violet-600 transition-all flex items-center justify-center text-2xl hover:scale-105">+</button>
+      <div className="fixed bottom-8 right-8 flex flex-col gap-3">
+        <button
+          onClick={() => {
+            setAddModalType("income");
+            setShowAddModal(true);
+          }}
+          className="w-14 h-14 rounded-full bg-emerald-600 text-white flex items-center justify-center text-2xl hover:bg-emerald-700 shadow-lg transition-all"
+        >
+          {"\u{1F4B0}"}
+        </button>
+        <button
+          onClick={() => {
+            setAddModalType("expense");
+            setShowAddModal(true);
+          }}
+          className="w-14 h-14 rounded-full bg-violet-600 text-white flex items-center justify-center text-2xl hover:bg-violet-700 shadow-lg transition-all"
+        >
+          {"\u{2795}"}
+        </button>
       </div>
 
+      {/* Modal */}
       {showAddModal && <AddModal />}
     </div>
   );
